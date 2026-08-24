@@ -184,6 +184,17 @@ struct Asm_riscv {
 		bool is_conditional() const {
 			return has_control();
 		}
+		bool is_nondeterministic() const {
+			return false;
+		}
+		bool has_implicit_mem() const {
+			if (!writes_mem && !reads_mem) {
+				return false;
+			}
+			u16 implicit = cast(u16)implicit_rd | cast(u16)implicit_wr;
+			bool is_atomic = false; // TODO(bill): Add ATOMIC flag to SideEffectFlags in the original INSTRUCTION_TABLE
+			return (implicit & (ClobberReg_SP)) != 0 || is_atomic;
+		}
 	};
 
 	void clobber_implicit_regs(StringSet *clobber_registers_set, u16 implicit_regs) {
@@ -216,6 +227,17 @@ struct Asm_riscv {
 		u16      csr;       // CSR address when a src slot is AliasSrc_CSR_LIT
 		u8       nargs;     // operands the user supplies (ARG0..<ARGn)
 		bool     rv32_only; // base gate (the *h counter reads)
+
+
+		// Nondeterministic iff this is a CSR access whose CSR operand names a counter/timer/entropy register (extension-gated; absent CSRs never match)
+		bool is_nondeterministic() const {
+			if (csr == 0x015) return true;                 // seed (Zkr)
+			if (0xC00 <= csr && csr <= 0xC1F) return true; // cycle/time/instret + hpm (unpriv)
+			if (0xC80 <= csr && csr <= 0xC9F) return true; // rv32 high halves (unpriv)
+			if (0xB00 <= csr && csr <= 0xB1F) return true; // mcycle/minstret + mhpm
+			if (0xB80 <= csr && csr <= 0xB9F) return true; // rv32 high halves (machine)
+			return false;
+		}
 	};
 
 	enum PseudoMnemonic : u16 {
@@ -244,7 +266,10 @@ struct Asm_riscv {
 	PseudoAlias pseudo_alias(u16 pm) {
 		PseudoAlias *pa = (PseudoAlias *)raw_pseudo_aliases;
 		return pa[pm];
-	}	static String const pseudo_mnemonic_strings[PSEUDO_MNEMONIC_COUNT];
+	}
+
+	static String const pseudo_mnemonic_strings[PSEUDO_MNEMONIC_COUNT];
+	
 
 	static u16    const register_codes  [REG_COUNT];
 	static String const register_strings[REG_COUNT];
@@ -616,6 +641,17 @@ struct Asm_riscv {
 		// Same mapping as reg_class_from_operand_type — these two look
 		// redundant; consider collapsing them into one.
 		return reg_class_from_operand_type(t);
+	}
+
+	// RISC-V has no slot that only one named hardware register can fill.
+	u16 operand_type_named_reg_class(OperandType t) const {
+		gb_unused(t);
+		return REG_CLASS_NONE;
+	}
+
+	String named_reg_class_string(u16 reg_class) const {
+		gb_unused(reg_class);
+		return str_lit("hardware");
 	}
 
 	u16 operand_type_bit_width(OperandType t) const {

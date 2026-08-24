@@ -467,6 +467,15 @@ enum IntegerDivisionByZeroKind : u8 {
 	IntegerDivisionByZero_AllBits,
 };
 
+// values of BuildContext.optimization_level;
+// matches Odin_Optimization_Mode in checker.cpp
+enum OptimizationLevel : i32 {
+	OptimizationLevel_None       = -1,
+	OptimizationLevel_Minimal    =  0,
+	OptimizationLevel_Size       =  1,
+	OptimizationLevel_Speed      =  2,
+	OptimizationLevel_Aggressive =  3,
+};
 
 // This stores the information for the specify architecture of this build
 struct BuildContext {
@@ -2633,12 +2642,13 @@ gb_internal bool init_build_paths(String init_filename) {
 
 	if (build_context.no_crt && !build_context.no_thread_local) {
 		switch (build_context.metrics.os) {
+		case TargetOs_windows:
 		case TargetOs_linux:
 		case TargetOs_darwin:
 		case TargetOs_freebsd:
 		case TargetOs_openbsd:
 		case TargetOs_netbsd:
-			gb_printf_err("-no-crt on Unix systems requires the -no-thread-local flag to also be present, because the TLS is inaccessible without CRT\n");
+			gb_printf_err("-no-crt requires the -no-thread-local flag to also be present, because the TLS is inaccessible without CRT\n");
 			no_crt_checks_failed = true;
 		}
 	}

@@ -168,6 +168,7 @@ main :: proc() {
 			SideEffectFlag_PRIVILEGED  = 1<<7, // requires CPL0 / reads-writes supervisor machine state
 			SideEffectFlag_CONTROL     = 1<<8, // alters control flow (writes RIP): branches, calls, returns
 			SideEffectFlag_CET         = 1<<9, // control-flow-enforcement: landing pads, shadow-stack ops
+			SideEffectFlag_NONDETERMINISTIC = 1<<10,
 		};
 		enum ClobberRegs : u16 {
 			ClobberReg_RAX    = 1<<0,
@@ -305,7 +306,8 @@ main :: proc() {
 					SideEffectFlag_HALT        |
 					SideEffectFlag_PRIVILEGED  |
 					SideEffectFlag_CONTROL     |
-					SideEffectFlag_CET;
+					SideEffectFlag_CET         |
+					SideEffectFlag_NONDETERMINISTIC;
 					// NOTE: SideEffectFlag_HINT deliberately excluded — inert, may be DCE'd.
 				return ((side_effects & VOLATILE_SE) != 0);
 			}
@@ -322,6 +324,16 @@ main :: proc() {
 			}
 			bool is_conditional() const {
 				return has_control() && (cast(u16)flags_rd != 0);
+			}
+			bool is_nondeterministic() const {
+				return (cast(u16)side_effects & SideEffectFlag_NONDETERMINISTIC) != 0;
+			}
+			bool has_implicit_mem() const {
+				if (!writes_mem && !reads_mem) {
+					return false;
+				}
+				u16 implicit = cast(u16)implicit_rd | cast(u16)implicit_wr;
+				return (implicit & (ClobberReg_RSP|ClobberReg_RSI|ClobberReg_RDI|ClobberReg_RBX)) != 0;
 			}
 		};
 
@@ -350,12 +362,17 @@ main :: proc() {
 			AliasSrc_LIT,
 		};
 
+		// NOTE(bill): These are completely dummy things as it is only needed by RISC-V and not x86
 		struct PseudoAlias {
-			Mnemonic target;    // real instruction emitted
-			AliasSrc src[4];    // how to fill target's four operand slots
-			i16      lit;       // immediate when a src slot is AliasSrc_LIT
-			u16      csr;       // CSR address when a src slot is AliasSrc_CSR_LIT
-			u8       nargs;     // operands the user supplies (ARG0..<ARGn)
+			Mnemonic target; // real instruction emitted
+			AliasSrc src[4]; // how to fill target's four operand slots
+			i16      lit;    // immediate when a src slot is AliasSrc_LIT
+			u16      csr;    // CSR address when a src slot is AliasSrc_CSR_LIT
+			u8       nargs;  // operands the user supplies (ARG0..<ARGn)
+
+			bool is_nondeterministic() const {
+				return false;
+			}
 		};
 		enum PseudoMnemonic : u16 {
 			PM_INVALID,
@@ -678,6 +695,36 @@ main :: proc() {
 				return AsmRegClass_Mask;
 			}
 			return AsmRegClass_Unknown; // OP_M*, OP_IMM*, OP_REL*, OP_SREG/CR/DR/MM/STi, moffs, ptr, m16_16... : no GPR/XMM class constraint here
+		}
+	""")
+
+
+	strings.write_string(&sb, "\n\n")
+
+	strings.write_string(&sb, """
+		// Slots only a specific named hardware register can fill. They carry no GPR/vector
+		// class and, apart from OP_MM, no width either. Nothing else in the size/class
+		// check constrains them and a template parameter would otherwise slip through.
+		u16 operand_type_named_reg_class(OperandType t) const {
+			switch (t) {
+			case OP_SREG: return REG_CLASS_SEG;
+			case OP_CR:   return REG_CLASS_CR;
+			case OP_DR:   return REG_CLASS_DR;
+			case OP_STI:  return REG_CLASS_ST;
+			case OP_MM:   return REG_CLASS_MM;
+			}
+			return REG_CLASS_NONE;
+		}
+
+		String named_reg_class_string(u16 reg_class) const {
+			switch (reg_class) {
+			case REG_CLASS_SEG: return str_lit("segment");
+			case REG_CLASS_CR:  return str_lit("control");
+			case REG_CLASS_DR:  return str_lit("debug");
+			case REG_CLASS_ST:  return str_lit("x87 stack");
+			case REG_CLASS_MM:  return str_lit("MMX");
+			}
+			return str_lit("hardware");
 		}
 	""")
 
