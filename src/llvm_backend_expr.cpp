@@ -156,7 +156,7 @@ gb_internal lbValue lb_emit_unary_arith(lbProcedure *p, TokenKind op, lbValue x,
 			if (opv != nullptr) {
 				LLVMSetAlignment(res.value, cast(unsigned)lb_alignof(vector_type));
 				LLVMValueRef res_ptr = LLVMBuildPointerCast(p->builder, res.value, LLVMPointerType(vector_type, 0), "");
-				LLVMBuildStore(p->builder, opv, res_ptr);
+				OdinLLVMBuildStore(p, opv, res_ptr);
 				return lb_emit_conv(p, lb_emit_load(p, res), type);
 			}
 		}
@@ -322,6 +322,21 @@ gb_internal IntegerDivisionByZeroKind lb_check_for_integer_division_by_zero_beha
 }
 
 
+// LLVM has srem(min(Integer_Type), -1) as UB and it raises an FP exception on a hardware
+// divide, yet `x % -1` is 0 for every x; `x srem 1` is 0 too and cannot trap, so a runtime
+// -1 divisor can be swapped for 1. Vectorizable.
+gb_internal LLVMValueRef lb_srem_safe_divisor(lbProcedure *p, LLVMValueRef rhs) {
+	LLVMValueRef minus_one = LLVMConstAllOnes(LLVMTypeOf(rhs));
+	// build 1 as neg(-1), this folds for both scalars and vectors
+	LLVMValueRef one = LLVMBuildNeg(p->builder, minus_one, "");
+	if (LLVMIsAConstantInt(rhs)) {
+		return rhs == minus_one ? one : rhs;
+	}
+	LLVMValueRef is_minus_one = LLVMBuildICmp(p->builder, LLVMIntEQ, rhs, minus_one, "");
+	return LLVMBuildSelect(p->builder, is_minus_one, one, rhs, "");
+}
+
+
 // implements %% (the remainder/floored mod operator) on signed integers;
 // this is branchless and vectorizable, so it also covers vectors
 gb_internal LLVMValueRef lb_emit_signed_floor_mod(lbProcedure *p, LLVMValueRef lhs, LLVMValueRef rhs) {	
@@ -329,24 +344,11 @@ gb_internal LLVMValueRef lb_emit_signed_floor_mod(lbProcedure *p, LLVMValueRef l
 	// and works for arbitrary precision integers, but the add can wrap at finite precision
 
 	// the Odin spec mandates min(Integer_Type) %% -1 must be 0,
-	// but LLVM has srem(min(Integer_Type), -1) as UB and results in FP exception;
-	// since x %% -1 == 0 for every x, a constant rhs = -1 can fold,
-	// and a runtime -1 can be swapped with 1 (x srem 1 is 0 for every x, no exceptions)	
-	LLVMValueRef minus_one = LLVMConstAllOnes(LLVMTypeOf(rhs));
-	LLVMValueRef safe_rhs = rhs;
-	if (LLVMIsAConstantInt(rhs)) {
-		if (rhs == minus_one) {
-			return LLVMConstNull(LLVMTypeOf(rhs)); // the entire %% op folds to 0
-		}
-	} else {
-		// safe_rhs = (rhs == -1) ? 1 : rhs 
-		// vectorizable construction,
-		// build 1 as neg(-1), this folds for both scalars and vectors
-		LLVMValueRef one = LLVMBuildNeg(p->builder, minus_one, "");
-		LLVMValueRef is_minus_one = LLVMBuildICmp(p->builder, LLVMIntEQ, rhs, minus_one, "");
-		safe_rhs = LLVMBuildSelect(p->builder, is_minus_one, one, rhs, "");
+	// a constant rhs = -1 can fold the whole operation, a runtime one is handled by the swap
+	if (LLVMIsAConstantInt(rhs) && rhs == LLVMConstAllOnes(LLVMTypeOf(rhs))) {
+		return LLVMConstNull(LLVMTypeOf(rhs)); // the entire %% op folds to 0
 	}
-	LLVMValueRef r = LLVMBuildSRem(p->builder, lhs, safe_rhs, "");
+	LLVMValueRef r = LLVMBuildSRem(p->builder, lhs, lb_srem_safe_divisor(p, rhs), "");
 	// srem truncs to 0, so r needs a +rhs correction when the operands signs differ (and r != 0)
 	// so we implement
 	// r = lhs % rhs
@@ -498,9 +500,10 @@ gb_internal bool lb_try_direct_vector_arith(lbProcedure *p, TokenKind op, lbValu
 				}
 				break;
 			case Token_Mod:
-				{
-					auto *call = is_type_unsigned(integral_type) ? LLVMBuildURem : LLVMBuildSRem;
-					z = call(p->builder, x, y, "");
+				if (is_type_unsigned(integral_type)) {
+					z = LLVMBuildURem(p->builder, x, y, "");
+				} else {
+					z = LLVMBuildSRem(p->builder, x, lb_srem_safe_divisor(p, y), "");
 				}
 				break;
 			case Token_ModMod:
@@ -533,7 +536,7 @@ gb_internal bool lb_try_direct_vector_arith(lbProcedure *p, TokenKind op, lbValu
 			lbAddr res = lb_add_local_generated_temp(p, type, lb_alignof(vector_type));
 
 			LLVMValueRef vp = LLVMBuildPointerCast(p->builder, res.addr.value, LLVMPointerType(vector_type, 0), "");
-			LLVMBuildStore(p->builder, z, vp);
+			OdinLLVMBuildStore(p, z, vp);
 			lbValue v = lb_addr_load(p, res);
 			if (res_) *res_ = v;
 			return true;
@@ -610,9 +613,10 @@ gb_internal bool lb_try_direct_vector_arith(lbProcedure *p, TokenKind op, lbValu
 				}
 				break;
 			case Token_Mod:
-				{
-					auto *call = is_type_unsigned(integral_type) ? LLVMBuildURem : LLVMBuildSRem;
-					z = call(p->builder, x, y, "");
+				if (is_type_unsigned(integral_type)) {
+					z = LLVMBuildURem(p->builder, x, y, "");
+				} else {
+					z = LLVMBuildSRem(p->builder, x, lb_srem_safe_divisor(p, y), "");
 				}
 				break;
 			case Token_ModMod:
@@ -645,8 +649,7 @@ gb_internal bool lb_try_direct_vector_arith(lbProcedure *p, TokenKind op, lbValu
 			lbAddr res = lb_add_local_generated_temp(p, type, lb_alignof(vector_type));
 
 			LLVMValueRef vp = LLVMBuildPointerCast(p->builder, res.addr.value, LLVMPointerType(vector_type, 0), "");
-			LLVMValueRef store = LLVMBuildStore(p->builder, z, vp);
-			LLVMSetAlignment(store, cast(unsigned)type_align_of(type));
+			OdinLLVMBuildStoreAligned(p, z, vp, type_align_of(type));
 			lbValue v = lb_addr_load(p, res);
 			if (res_) *res_ = v;
 			return true;
@@ -909,8 +912,7 @@ gb_internal lbValue lb_emit_matrix_transpose(lbProcedure *p, lbValue m, Type *ty
 		LLVMValueRef res_ptr = res.addr.value;
 		res_ptr = LLVMBuildPointerCast(p->builder, res_ptr, LLVMPointerType(LLVMTypeOf(transposed_vector), 0), "");
 
-		LLVMValueRef store = LLVMBuildStore(p->builder, transposed_vector, res_ptr);
-		LLVMSetAlignment(store, cast(unsigned)type_align_of(type));
+		OdinLLVMBuildStoreAligned(p, transposed_vector, res_ptr, type_align_of(type));
 
 		return lb_addr_load(p, res);
 	}
@@ -938,7 +940,7 @@ gb_internal lbAddr llvm_add_local_generated_from_vector(lbProcedure *p, Type *ty
 	LLVMSetAlignment(res_ptr, alignment);
 
 	res_ptr = LLVMBuildPointerCast(p->builder, res_ptr, LLVMPointerType(LLVMTypeOf(vector), 0), "");
-	LLVMBuildStore(p->builder, vector, res_ptr);
+	OdinLLVMBuildStore(p, vector, res_ptr);
 
 	return res;
 }
@@ -1072,7 +1074,7 @@ gb_internal lbValue lb_emit_matrix_mul(lbProcedure *p, lbValue lhs, lbValue rhs,
 				for (unsigned i = 0; i < N; i++) {
 					LLVMValueRef indices[] = {do_u32(p, i)};
 	 				LLVMValueRef dst = LLVMBuildInBoundsGEP2(p->builder, LLVMTypeOf(z_columns[0]), dest_ptr, indices, 1, "");
-	 				LLVMBuildStore(p->builder, z_columns[i], dst);
+	 				OdinLLVMBuildStore(p, z_columns[i], dst);
 				}
 
 				return lb_addr_load(p, res);
@@ -1108,7 +1110,7 @@ gb_internal lbValue lb_emit_matrix_mul(lbProcedure *p, lbValue lhs, lbValue rhs,
 					LLVMValueRef y_column = y_columns[j];
 					LLVMValueRef elem = llvm_vector_dot(p, x_row, y_column);
 					lbValue dst = lb_emit_matrix_epi(p, res.addr, i, j);
-					LLVMBuildStore(p->builder, elem, dst.value);
+					OdinLLVMBuildStore(p, elem, dst.value);
 				}
 			}
 			return lb_addr_load(p, res);
@@ -1158,7 +1160,7 @@ gb_internal lbValue lb_emit_matrix_mul(lbProcedure *p, lbValue lhs, lbValue rhs,
 				for (unsigned i = 0; i < N; i++) {
 					LLVMValueRef indices[] = {do_u32(p, i)};
 	 				LLVMValueRef dst = LLVMBuildInBoundsGEP2(p->builder, LLVMTypeOf(z_rows[0]), dest_ptr, indices, 1, "");
-	 				LLVMBuildStore(p->builder, z_rows[i], dst);
+	 				OdinLLVMBuildStore(p, z_rows[i], dst);
 				}
 
 				return lb_addr_load(p, res);
@@ -1193,7 +1195,7 @@ gb_internal lbValue lb_emit_matrix_mul(lbProcedure *p, lbValue lhs, lbValue rhs,
 					LLVMValueRef y_column = y_columns[j];
 					LLVMValueRef elem = llvm_vector_dot(p, x_row, y_column);
 					lbValue dst = lb_emit_matrix_epi(p, res.addr, i, j);
-					LLVMBuildStore(p->builder, elem, dst.value);
+					OdinLLVMBuildStore(p, elem, dst.value);
 				}
 			}
 			return lb_addr_load(p, res);
@@ -1286,10 +1288,9 @@ gb_internal lbValue lb_emit_matrix_mul_vector(lbProcedure *p, lbValue lhs, lbVal
 		if (LLVMIsALoadInst(rhs.value)) {
 			LLVMValueRef rhs_ptr = LLVMGetOperand(rhs.value, 0);
 			LLVMTypeRef vector_type = LLVMVectorType(lb_type(p->module, elem), cast(unsigned)vector_count);
-			LLVMValueRef rhs_vector = LLVMBuildLoad2(p->builder, vector_type, rhs_ptr, "");
 			// The alignment of what is being loaded, which is the right-hand vector. `type` is the
 			// result, and asking it cannot be right except by coincidence.
-			LLVMSetAlignment(rhs_vector, cast(unsigned)type_align_of(vt));
+			LLVMValueRef rhs_vector = OdinLLVMBuildLoadAligned(p, vector_type, rhs_ptr, type_align_of(vt));
 
 			for (unsigned i = 0; i < column_count; i++) {
 				LLVMValueRef mask = llvm_mask_same(p->module, i, row_count);
@@ -1684,7 +1685,8 @@ gb_internal LLVMValueRef lb_integer_modulo(lbProcedure *p, LLVMValueRef lhs, LLV
 			if (is_unsigned) {
 				return LLVMBuildURem(p->builder, lhs, rhs, "");
 			} else {
-				return LLVMBuildSRem(p->builder, lhs, rhs, "");
+				// min(Integer_Type) % -1 is 0, matching the constant folder, and must not trap
+				return LLVMBuildSRem(p->builder, lhs, lb_srem_safe_divisor(p, rhs), "");
 			}
 		}
 	};
@@ -2407,6 +2409,13 @@ gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t) {
 	// boolean -> boolean/integer
 	if (is_type_boolean(src) && (is_type_boolean(dst) || is_type_integer(dst))) {
 		LLVMValueRef b = LLVMBuildICmp(p->builder, LLVMIntNE, value.value, LLVMConstNull(lb_type(m, value.type)), "");
+		if (type_size_of(default_type(dst)) > 1 && is_type_different_to_arch_endianness(dst)) {
+			Type *platform_dst_type = integer_endian_type_to_platform_type(dst);
+			lbValue res = {};
+			res.value = LLVMBuildIntCast2(p->builder, b, lb_type(m, platform_dst_type), false, "");
+			res.type = t;
+			return lb_emit_byte_swap(p, res, t);
+		}
 		lbValue res = {};
 		res.value = LLVMBuildIntCast2(p->builder, b, lb_type(m, t), false, "");
 		res.type = t;
@@ -3071,8 +3080,7 @@ gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t) {
 
 					LLVMValueRef dst_vector = LLVMBuildCast(p->builder, op, src_vector, dst_vector_type, "");
 
-					LLVMValueRef store = LLVMBuildStore(p->builder, dst_vector, dst_ptr);
-					LLVMSetAlignment(store, cast(unsigned)type_align_of(de));
+					OdinLLVMBuildStoreAligned(p, dst_vector, dst_ptr, type_align_of(de));
 
 					return lb_addr_load(p, v);
 				} else if (is_type_complex(de)) {
@@ -3119,8 +3127,7 @@ gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t) {
 					dst_vector = LLVMBuildShuffleVector(p->builder, dst_vector, dst_zero, dst_mask, "");
 
 
-					LLVMValueRef store = LLVMBuildStore(p->builder, dst_vector, dst_ptr);
-					LLVMSetAlignment(store, cast(unsigned)type_align_of(de));
+					OdinLLVMBuildStoreAligned(p, dst_vector, dst_ptr, type_align_of(de));
 
 					return lb_addr_load(p, v);
 				}
@@ -3862,6 +3869,24 @@ gb_internal lbValue lb_emit_comp(lbProcedure *p, TokenKind op_kind, lbValue left
 			Type *pt = integer_endian_type_to_platform_type(left.type);
 			lhs = lb_emit_byte_swap(p, {lhs, pt}, pt).value;
 			rhs = lb_emit_byte_swap(p, {rhs, pt}, pt).value;
+		}
+
+		if (is_type_boolean(a) && is_type_boolean(b) && (op_kind == Token_CmpEq || op_kind == Token_NotEq)) {
+			// anything not 0 is true, which is what control flow already tests for
+			bool lhs_is_const = LLVMIsAConstantInt(lhs) != nullptr;
+			bool rhs_is_const = LLVMIsAConstantInt(rhs) != nullptr;
+			if (lhs_is_const != rhs_is_const) {
+				// against a literal, the truthiness test is the whole comparison
+				LLVMValueRef v = rhs_is_const ? lhs : rhs;
+				LLVMValueRef c = rhs_is_const ? rhs : lhs;
+				bool is_true = LLVMConstIntGetZExtValue(c) != 0;
+				pred = ((op_kind == Token_CmpEq) == is_true) ? LLVMIntNE : LLVMIntEQ;
+				lhs = v;
+				rhs = LLVMConstNull(LLVMTypeOf(v));
+			} else {
+				lhs = LLVMBuildICmp(p->builder, LLVMIntNE, lhs, LLVMConstNull(LLVMTypeOf(lhs)), "");
+				rhs = LLVMBuildICmp(p->builder, LLVMIntNE, rhs, LLVMConstNull(LLVMTypeOf(rhs)), "");
+			}
 		}
 
 		res.value = LLVMBuildICmp(p->builder, pred, lhs, rhs, "");
@@ -5672,8 +5697,8 @@ gb_internal lbAddr lb_build_addr_slice_expr(lbProcedure *p, Ast *expr) {
 
 			LLVMValueRef gep0 = lb_emit_struct_ep(p, res.addr, 0).value;
 			LLVMValueRef gep1 = lb_emit_struct_ep(p, res.addr, 1).value;
-			LLVMBuildStore(p->builder, ptr, gep0);
-			LLVMBuildStore(p->builder, len, gep1);
+			OdinLLVMBuildStore(p, ptr, gep0);
+			OdinLLVMBuildStore(p, len, gep1);
 		}
 		return res;
 	}
@@ -5828,15 +5853,14 @@ gb_internal lbAddr lb_build_addr_slice_expr(lbProcedure *p, Ast *expr) {
 	return {};
 }
 
-gb_internal void lb_build_struct_compound_lit_field_assignment(lbProcedure *p, lbValue comp_lit_ptr, Entity *field_entity, isize index, lbValue field_expr, bool is_raw_union) {
+gb_internal void lb_build_struct_compound_lit_field_assignment(lbProcedure *p, lbValue comp_lit_ptr, Entity *field_entity, isize index, lbValue field_expr) {
 	Type *ft = field_entity->type;
 
-	lbValue gep = {};
-	if (is_raw_union) {
-		gep = lb_emit_conv(p, comp_lit_ptr, alloc_type_pointer(ft));
-	} else {
-		gep = lb_emit_struct_ep(p, comp_lit_ptr, cast(i32)index);
-	}
+	// for a #raw_union field this is a zero-offset GEP
+	// (not a pointer cast like in unions),
+	// so a raw union's #align cap can attach as metadata;
+	// a conversion for raw unions here would prevent this
+	lbValue gep = lb_emit_struct_ep(p, comp_lit_ptr, cast(i32)index);
 
 	Type *fet = field_expr.type;
 	GB_ASSERT(fet->kind != Type_Tuple);
@@ -5928,7 +5952,7 @@ gb_internal void lb_build_addr_struct_compound_lit_populate(lbProcedure *p, Ast 
 
 			field_expr = lb_build_expr(p, elem);
 
-			lb_build_struct_compound_lit_field_assignment(p, comp_lit_ptr, field, index, field_expr, is_raw_union);
+			lb_build_struct_compound_lit_field_assignment(p, comp_lit_ptr, field, index, field_expr);
 		}
 
 		return;
@@ -5955,7 +5979,7 @@ gb_internal void lb_build_addr_struct_compound_lit_populate(lbProcedure *p, Ast 
 				Entity *field = st->fields[index];
 				lbValue field_expr = lb_emit_struct_ev(p, tuple_field_expr, cast(i32)jj);
 
-				lb_build_struct_compound_lit_field_assignment(p, comp_lit_ptr, field, index, field_expr, is_raw_union);
+				lb_build_struct_compound_lit_field_assignment(p, comp_lit_ptr, field, index, field_expr);
 			}
 			continue;
 		}
@@ -5975,7 +5999,7 @@ gb_internal void lb_build_addr_struct_compound_lit_populate(lbProcedure *p, Ast 
 
 		lbValue field_expr = lb_build_expr(p, elem);
 
-		lb_build_struct_compound_lit_field_assignment(p, comp_lit_ptr, field, index, field_expr, is_raw_union);
+		lb_build_struct_compound_lit_field_assignment(p, comp_lit_ptr, field, index, field_expr);
 	}
 }
 
@@ -6106,7 +6130,7 @@ gb_internal lbAddr lb_build_addr_compound_lit(lbProcedure *p, Ast *expr) {
 					res = LLVMBuildOr(p->builder, res, elem, "");
 				}
 
-				LLVMBuildStore(p->builder, res, v.addr.value);
+				OdinLLVMBuildStore(p, res, v.addr.value);
 			} else if (is_type_array(backing_type)) {
 				// ARRAY OF INTEGER BACKING
 
@@ -6163,7 +6187,7 @@ gb_internal lbAddr lb_build_addr_compound_lit(lbProcedure *p, Ast *expr) {
 
 				for (i64 i = 0; i < array_count; i++) {
 					LLVMValueRef elem_ptr = LLVMBuildStructGEP2(p->builder, lb_type(p->module, backing_type), v.addr.value, cast(unsigned)i, "");
-					LLVMBuildStore(p->builder, elems[i], elem_ptr);
+					OdinLLVMBuildStore(p, elems[i], elem_ptr);
 				}
 			} else {
 				// SLOW STORAGE

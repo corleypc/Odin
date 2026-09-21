@@ -462,6 +462,20 @@ INSTRUCTION_TABLE := [Mnemonic][]Form{
 		{{.SAR, {.RM64, .CL_IMPL,  .NONE, .NONE}, {.MR, .IMPL, .NONE, .NONE}, 0xD3, 7, {force_rex_w=true, modrm_reg_ext=true}}, {written={0}, read={0}, implicit_rd={.RCX}, flags_wr={.CF, .PF, .ZF, .SF, .OF}, flags_undef={.AF}, writes_mem=true, reads_mem=true}},
 		{{.SAR, {.RM64, .IMM8,     .NONE, .NONE}, {.MR, .IB,   .NONE, .NONE}, 0xC1, 7, {force_rex_w=true, modrm_reg_ext=true}}, {written={0}, read={0, 1}, flags_wr={.CF, .PF, .ZF, .SF, .OF}, flags_undef={.AF}, writes_mem=true, reads_mem=true}},
 	},
+	.SAL = {
+		{{.SAL, {.RM8,  .ONE_IMPL, .NONE, .NONE}, {.MR, .IMPL, .NONE, .NONE}, 0xD0, 4, {modrm_reg_ext=true}},                   {written={0}, read={0}, flags_wr={.CF, .PF, .ZF, .SF, .OF}, flags_undef={.AF}, writes_mem=true, reads_mem=true}},
+		{{.SAL, {.RM8,  .CL_IMPL,  .NONE, .NONE}, {.MR, .IMPL, .NONE, .NONE}, 0xD2, 4, {modrm_reg_ext=true}},                   {written={0}, read={0}, implicit_rd={.RCX}, flags_wr={.CF, .PF, .ZF, .SF, .OF}, flags_undef={.AF}, writes_mem=true, reads_mem=true}},
+		{{.SAL, {.RM8,  .IMM8,     .NONE, .NONE}, {.MR, .IB,   .NONE, .NONE}, 0xC0, 4, {modrm_reg_ext=true}},                   {written={0}, read={0, 1}, flags_wr={.CF, .PF, .ZF, .SF, .OF}, flags_undef={.AF}, writes_mem=true, reads_mem=true}},
+		{{.SAL, {.RM16, .ONE_IMPL, .NONE, .NONE}, {.MR, .IMPL, .NONE, .NONE}, 0xD1, 4, {modrm_reg_ext=true}},                   {written={0}, read={0}, flags_wr={.CF, .PF, .ZF, .SF, .OF}, flags_undef={.AF}, writes_mem=true, reads_mem=true}},
+		{{.SAL, {.RM16, .CL_IMPL,  .NONE, .NONE}, {.MR, .IMPL, .NONE, .NONE}, 0xD3, 4, {modrm_reg_ext=true}},                   {written={0}, read={0}, implicit_rd={.RCX}, flags_wr={.CF, .PF, .ZF, .SF, .OF}, flags_undef={.AF}, writes_mem=true, reads_mem=true}},
+		{{.SAL, {.RM16, .IMM8,     .NONE, .NONE}, {.MR, .IB,   .NONE, .NONE}, 0xC1, 4, {modrm_reg_ext=true}},                   {written={0}, read={0, 1}, flags_wr={.CF, .PF, .ZF, .SF, .OF}, flags_undef={.AF}, writes_mem=true, reads_mem=true}},
+		{{.SAL, {.RM32, .ONE_IMPL, .NONE, .NONE}, {.MR, .IMPL, .NONE, .NONE}, 0xD1, 4, {modrm_reg_ext=true}},                   {written={0}, read={0}, flags_wr={.CF, .PF, .ZF, .SF, .OF}, flags_undef={.AF}, writes_mem=true, reads_mem=true}},
+		{{.SAL, {.RM32, .CL_IMPL,  .NONE, .NONE}, {.MR, .IMPL, .NONE, .NONE}, 0xD3, 4, {modrm_reg_ext=true}},                   {written={0}, read={0}, implicit_rd={.RCX}, flags_wr={.CF, .PF, .ZF, .SF, .OF}, flags_undef={.AF}, writes_mem=true, reads_mem=true}},
+		{{.SAL, {.RM32, .IMM8,     .NONE, .NONE}, {.MR, .IB,   .NONE, .NONE}, 0xC1, 4, {modrm_reg_ext=true}},                   {written={0}, read={0, 1}, flags_wr={.CF, .PF, .ZF, .SF, .OF}, flags_undef={.AF}, writes_mem=true, reads_mem=true}},
+		{{.SAL, {.RM64, .ONE_IMPL, .NONE, .NONE}, {.MR, .IMPL, .NONE, .NONE}, 0xD1, 4, {force_rex_w=true, modrm_reg_ext=true}}, {written={0}, read={0}, flags_wr={.CF, .PF, .ZF, .SF, .OF}, flags_undef={.AF}, writes_mem=true, reads_mem=true}},
+		{{.SAL, {.RM64, .CL_IMPL,  .NONE, .NONE}, {.MR, .IMPL, .NONE, .NONE}, 0xD3, 4, {force_rex_w=true, modrm_reg_ext=true}}, {written={0}, read={0}, implicit_rd={.RCX}, flags_wr={.CF, .PF, .ZF, .SF, .OF}, flags_undef={.AF}, writes_mem=true, reads_mem=true}},
+		{{.SAL, {.RM64, .IMM8,     .NONE, .NONE}, {.MR, .IB,   .NONE, .NONE}, 0xC1, 4, {force_rex_w=true, modrm_reg_ext=true}}, {written={0}, read={0, 1}, flags_wr={.CF, .PF, .ZF, .SF, .OF}, flags_undef={.AF}, writes_mem=true, reads_mem=true}},
+	},
 	.ROL = {
 		{{.ROL, {.RM8,  .ONE_IMPL, .NONE, .NONE}, {.MR, .IMPL, .NONE, .NONE}, 0xD0, 0, {modrm_reg_ext=true}},                   {written={0}, read={0}, flags_wr={.CF, .OF}, writes_mem=true, reads_mem=true}},
 		{{.ROL, {.RM8,  .CL_IMPL,  .NONE, .NONE}, {.MR, .IMPL, .NONE, .NONE}, 0xD2, 0, {modrm_reg_ext=true}},                   {written={0}, read={0}, implicit_rd={.RCX}, flags_wr={.CF, .OF}, writes_mem=true, reads_mem=true}},
@@ -719,14 +733,20 @@ INSTRUCTION_TABLE := [Mnemonic][]Form{
 		{{.JS, {.REL8,  .NONE, .NONE, .NONE}, {.IB, .NONE, .NONE, .NONE}, 0x78, 0, {}},         {flags_rd={.SF}, side_effects={.CONTROL}}},
 		{{.JS, {.REL32, .NONE, .NONE, .NONE}, {.ID, .NONE, .NONE, .NONE}, 0x88, 0, {esc=._0F}}, {flags_rd={.SF}, side_effects={.CONTROL}}},
 	},
+	/* 0xE3 is ONE opcode whose mnemonic is chosen by ADDRESS size -- which
+	   counter register it tests -- not by operand size. So the three are told
+	   apart by `addr_size` (67h against the mode default), never by REX.W, which
+	   does not affect address size at all: JRCXZ is a bare `E3 cb` in long mode
+	   and JECXZ is `67 E3 cb`; in protected mode JECXZ is bare and JCXZ takes
+	   the prefix, while JCXZ is unreachable in long mode and JRCXZ outside it. */
 	.JCXZ = {
-		{{.JCXZ, {.REL8, .NONE, .NONE, .NONE}, {.IB, .NONE, .NONE, .NONE}, 0xE3, 0, {}}, {implicit_rd={.RCX}, side_effects={.CONTROL}}},
+		{{.JCXZ, {.REL8, .NONE, .NONE, .NONE}, {.IB, .NONE, .NONE, .NONE}, 0xE3, 0, {addr_size=.A16}}, {implicit_rd={.RCX}, side_effects={.CONTROL}}},
 	},
 	.JECXZ = {
-		{{.JECXZ, {.REL8, .NONE, .NONE, .NONE}, {.IB, .NONE, .NONE, .NONE}, 0xE3, 0, {}}, {implicit_rd={.RCX}, side_effects={.CONTROL}}},
+		{{.JECXZ, {.REL8, .NONE, .NONE, .NONE}, {.IB, .NONE, .NONE, .NONE}, 0xE3, 0, {addr_size=.A32}}, {implicit_rd={.RCX}, side_effects={.CONTROL}}},
 	},
 	.JRCXZ = {
-		{{.JRCXZ, {.REL8, .NONE, .NONE, .NONE}, {.IB, .NONE, .NONE, .NONE}, 0xE3, 0, {force_rex_w=true}}, {implicit_rd={.RCX}, side_effects={.CONTROL}}},
+		{{.JRCXZ, {.REL8, .NONE, .NONE, .NONE}, {.IB, .NONE, .NONE, .NONE}, 0xE3, 0, {addr_size=.A64}}, {implicit_rd={.RCX}, side_effects={.CONTROL}}},
 	},
 	.LOOP = {
 		{{.LOOP, {.REL8, .NONE, .NONE, .NONE}, {.IB, .NONE, .NONE, .NONE}, 0xE2, 0, {}}, {implicit_wr={.RCX}, implicit_rd={.RCX}, side_effects={.CONTROL}}},

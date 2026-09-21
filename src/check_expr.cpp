@@ -7104,6 +7104,18 @@ gb_internal CallArgumentError check_call_arguments_internal(CheckerContext *c, A
 			}
 		}
 
+		// an `asm` template's `$` parameter is encoded as an immediate, so only a constant can reach it
+		if (e && e->kind == Entity_Variable && (e->flags & EntityFlag_PolyConst)) {
+			if (o->mode != Addressing_Constant) {
+				if (show_error) {
+					gbString str = expr_to_string(o->expr);
+					error(o->expr, "Expected a constant value for the '$' immediate '%.*s', got %s", LIT(e->token.string), str);
+					gb_string_free(str);
+				}
+				err = CallArgumentError_NoneConstantParameter;
+			}
+		}
+
 		if (e && e->kind == Entity_Constant && is_type_proc(e->type)) {
 			bool ok = false;
 			if (o->mode == Addressing_Constant) {
@@ -9234,25 +9246,29 @@ gb_internal ExprKind check_call_expr(CheckerContext *c, Operand *operand, Ast *c
 		break;
 	}
 
-	{
+	if (pt->kind == Type_Proc) {
+		char const *kind = "procedure";
+		if (pt->Proc.calling_convention == ProcCC_InlineAsm) {
+			kind = "inline 'asm' template";
+		}
 		String invalid;
-		if (pt->kind == Type_Proc && pt->Proc.require_target_feature.len != 0) {
+		if (pt->Proc.require_target_feature.len != 0) {
 			if (!check_target_feature_is_valid_for_target_arch(pt->Proc.require_target_feature, &invalid)) {
-				error(call, "Called procedure requires target feature '%.*s' which is invalid for the build target", LIT(invalid));
+				error(call, "Called %s requires target feature '%.*s' which is invalid for the build target", kind, LIT(invalid));
 			} else if (!check_target_feature_is_enabled(pt->Proc.require_target_feature, &invalid)) {
-				error(call, "Calling this procedure requires target feature '%.*s' to be enabled", LIT(invalid));
+				error(call, "Calling this %s requires target feature '%.*s' to be enabled", kind, LIT(invalid));
 			}
 		}
 
-		if (pt->kind == Type_Proc && pt->Proc.enable_target_feature.len != 0) {
+		if (pt->Proc.enable_target_feature.len != 0) {
 			if (!check_target_feature_is_valid_for_target_arch(pt->Proc.enable_target_feature, &invalid)) {
-				error(call, "Called procedure enables target feature '%.*s' which is invalid for the build target", LIT(invalid));
+				error(call, "Called %s enables target feature '%.*s' which is invalid for the build target", kind, LIT(invalid));
 			}
 
 			// NOTE: Due to restrictions in LLVM you can not inline calls with a superset of features.
 			if (is_call_inlined) {
 				if (c->curr_proc_decl == nullptr) {
-					error(call, "Calling a '#force_inline' procedure that enables target features is not allowed at file scope");
+					error(call, "Calling a '#force_inline' %s that enables target features is not allowed at file scope", kind);
 				} else {
 					Entity *e = c->curr_proc_decl->entity.load();
 					GB_ASSERT(e);
@@ -9260,7 +9276,7 @@ gb_internal ExprKind check_call_expr(CheckerContext *c, Operand *operand, Ast *c
 					String scope_features = e->type->Proc.enable_target_feature;
 					if (!check_target_feature_is_superset_of(scope_features, pt->Proc.enable_target_feature, &invalid)) {
 						ERROR_BLOCK();
-						error(call, "Inlined procedure enables target feature '%.*s', this requires the calling procedure to at least enable the same feature", LIT(invalid));
+						error(call, "Inlined %s enables target feature '%.*s', this requires the calling %s to at least enable the same feature", kind, LIT(invalid), kind);
 
 						error_line("\tSuggested Example: @(enable_target_feature=\"%.*s\")\n", LIT(invalid));
 					}
@@ -13994,6 +14010,10 @@ gb_internal gbString write_expr_to_string(gbString str, Ast *node, bool shorthan
 		if (spec->value) {
 			str = gb_string_appendc(str, " = ");
 			str = write_expr_to_string(str, spec->value, shorthand);
+		}
+		for (Ast *dir : spec->directives) {
+			str = gb_string_appendc(str, " ");
+			str = write_expr_to_string(str, dir, shorthand);
 		}
 	case_end;
 

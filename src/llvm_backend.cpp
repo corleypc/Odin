@@ -2100,7 +2100,7 @@ gb_internal bool lb_init_global_var(lbModule *m, lbProcedure *p, Entity *e, Ast 
 			lbValue src0 = lb_emit_conv(p, var.init, t);
 			LLVMValueRef src = OdinLLVMBuildTransmute(p, src0.value, vt);
 			LLVMValueRef dst = var.var.value;
-			LLVMBuildStore(p->builder, src, dst);
+			OdinLLVMBuildStore(p, src, dst);
 		}
 
 		var.is_initialized = true;
@@ -2977,7 +2977,7 @@ gb_internal lbProcedure *lb_create_main_procedure(lbModule *m, lbProcedure *star
 			LLVMValueRef dst = LLVMConstInBoundsGEP2(llvm_addr_type(m, all_tests_array), all_tests_array.value, indices, gb_count_of(indices));
 			LLVMValueRef src = llvm_const_named_struct(m, t_Internal_Test, vals, gb_count_of(vals));
 
-			LLVMBuildStore(p->builder, src, dst);
+			OdinLLVMBuildStore(p, src, dst);
 		}
 
 		lbAddr all_tests_slice = lb_add_local_generated(p, slice_type, true);
@@ -3164,10 +3164,9 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 
 	gbString llvm_features = gb_string_make(temporary_allocator(), "");
 	String_Iterator it = {build_context.target_features_string, 0};
+	String str = {};
 	bool first = true;
-	for (;;) {
-		String str = string_split_iterator(&it, ',');
-		if (str == "") break;
+	while (string_split_iterator_next(&it, ',', &str)) {
 		if (!first) {
 			llvm_features = gb_string_appendc(llvm_features, ",");
 		}

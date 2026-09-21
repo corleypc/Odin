@@ -3146,6 +3146,13 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			}
 
 			ast_node(se, SelectorExpr, arg0);
+			if (unparen_expr(se->expr)->kind == Ast_SelectorExpr) {
+				gbString x = expr_to_string(arg0);
+				error(ce->args[0], "Chained expressions are not allowed for '%.*s', got '%s' ", LIT(builtin_name), x);
+				gb_string_free(x);
+				return false;
+
+			}
 
 			Operand x = {};
 			check_expr(c, &x, se->expr);
@@ -5226,6 +5233,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		}
 		if (big_int_is_neg(&x.value.value_integer)) {
 			error(call, "Negative array element length");
+			operand->mode = Addressing_Type;
+			operand->type = t_invalid;
+			return false;
+		}
+		convert_to_typed(c, &x, t_int);
+		if (x.mode == Addressing_Invalid) {
 			operand->mode = Addressing_Type;
 			operand->type = t_invalid;
 			return false;
@@ -7710,6 +7723,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				return false;
 			}
 			
+			convert_to_typed(c, &x, t_int);
+			if (x.mode == Addressing_Invalid) {
+				operand->mode = Addressing_Type;
+				operand->type = t_invalid;
+				return false;
+			}
 			i64 index = big_int_to_i64(&x.value.value_integer);
 			if (index < 0 || index >= u->Union.variants.count) {
 				error(call, "Variant tag out of bounds index for '%.*s", LIT(builtin_name));

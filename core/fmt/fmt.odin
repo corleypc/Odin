@@ -1037,7 +1037,9 @@ fmt_write_padding :: proc(fi: ^Info, width: int) {
 	}
 
 	pad_byte: byte = ' '
-	if !fi.space {
+	if !fi.space && !fi.minus {
+		// a left-justified field pads to the right of the digits, where a '0' would read
+		// as part of the number rather than as filler
 		pad_byte = '0'
 	}
 
@@ -1100,7 +1102,13 @@ _fmt_int :: proc(fi: ^Info, u: u64, base: int, is_signed: bool, bit_size: int, d
 	if fi.prec_set {
 		prec = fi.prec
 		if prec == 0 && u == 0 {
-			fmt_write_padding(fi, fi.width)
+			if fi.minus {
+				io.write_byte(fi.writer, '0', &fi.n)
+				fmt_write_padding(fi, fi.width - 1)
+			} else {
+				fmt_write_padding(fi, fi.width - 1)
+				io.write_byte(fi.writer, '0', &fi.n)
+			}
 			return
 		}
 	} else if fi.zero && fi.width_set {

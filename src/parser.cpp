@@ -2,6 +2,43 @@
 
 gb_global std::atomic<bool> g_parsing_done;
 
+
+gb_internal bool in_strict_style_packages(AstFile *file) {
+	if (file == nullptr) {
+		return true;
+	}
+
+	if (file->pkg == nullptr) {
+		return true;
+	}
+
+	if (file->pkg_decl == nullptr) {
+		return true;
+	}
+
+	if (build_context.strict_style_packages.entries.count == 0) {
+		return true;
+	}
+
+	String pkg_name = {};
+
+	if (file->pkg->name.len > 0) {
+		pkg_name = file->pkg->name;
+	} else if (file->pkg_decl->kind == Ast_PackageDecl) {
+		Token name_token = file->pkg_decl->PackageDecl.name;
+		if (name_token.kind == Token_Ident) {
+			pkg_name = name_token.string;
+		}
+	}
+
+	if (pkg_name.len == 0) {
+		return true;
+	}
+
+	return string_set_exists(&build_context.strict_style_packages, pkg_name);
+}
+
+
 gb_internal bool in_vet_packages(AstFile *file) {
 	if (file == nullptr) {
 		return true;
@@ -37,6 +74,11 @@ gb_internal bool in_vet_packages(AstFile *file) {
 	return string_set_exists(&build_context.vet_packages, pkg_name);
 }
 
+gb_internal bool is_strict_style(AstFile *file) {
+	return build_context.strict_style && in_strict_style_packages(file);
+}
+
+
 gb_internal u64 ast_file_vet_flags(AstFile *f) {
 	if (f != nullptr && f->vet_flags_set) {
 		return f->vet_flags;
@@ -62,7 +104,7 @@ gb_internal bool ast_file_vet_explicit_allocators(AstFile *f) {
 }
 
 gb_internal bool file_allow_newline(AstFile *f) {
-	bool is_strict = build_context.strict_style || ast_file_vet_style(f);
+	bool is_strict = is_strict_style(f) || ast_file_vet_style(f);
 	return !is_strict;
 }
 
@@ -533,10 +575,11 @@ gb_internal Ast *clone_ast(Ast *node, AstFile *f) {
 	case Ast_AsmRegister:
 		break;
 	case Ast_AsmSpec:
-		n->AsmSpec.name      = clone_ast(n->AsmSpec.name,      f);
-		n->AsmSpec.tied_name = clone_ast(n->AsmSpec.tied_name, f);
-		n->AsmSpec.type      = clone_ast(n->AsmSpec.type,      f);
-		n->AsmSpec.value     = clone_ast(n->AsmSpec.value,     f);
+		n->AsmSpec.name       = clone_ast(n->AsmSpec.name,      f);
+		n->AsmSpec.tied_name  = clone_ast(n->AsmSpec.tied_name, f);
+		n->AsmSpec.type       = clone_ast(n->AsmSpec.type,      f);
+		n->AsmSpec.value      = clone_ast(n->AsmSpec.value,     f);
+		n->AsmSpec.directives = clone_ast_array(n->AsmSpec.directives, f);
 		break;
 	case Ast_AsmClobber:
 		n->AsmClobber.value = clone_ast(n->AsmClobber.value, f);
@@ -547,6 +590,7 @@ gb_internal Ast *clone_ast(Ast *node, AstFile *f) {
 	case Ast_AsmInstruction:
 		n->AsmInstruction.name     = clone_ast(n->AsmInstruction.name, f);
 		n->AsmInstruction.operands = clone_ast_array(n->AsmInstruction.operands, f);
+		n->AsmInstruction.facts    = nullptr;
 		break;
 	case Ast_AsmMemoryOperand:
 		n->AsmMemoryOperand.segment_override = clone_ast(n->AsmMemoryOperand.segment_override, f);
@@ -555,6 +599,10 @@ gb_internal Ast *clone_ast(Ast *node, AstFile *f) {
 		n->AsmMemoryOperand.scale = clone_ast(n->AsmMemoryOperand.scale, f);
 		n->AsmMemoryOperand.disp  = clone_ast(n->AsmMemoryOperand.disp,  f);
 		n->AsmMemoryOperand.type  = clone_ast(n->AsmMemoryOperand.type,  f);
+		break;
+	case Ast_AsmRegisterGroup:
+		n->AsmRegisterGroup.registers = clone_ast_array(n->AsmRegisterGroup.registers, f);
+		n->AsmRegisterGroup.type      = clone_ast(n->AsmRegisterGroup.type, f);
 		break;
 	case Ast_AsmDirective:
 		n->AsmDirective.operands = clone_ast_array(n->AsmDirective.operands, f);
@@ -1681,7 +1729,7 @@ gb_internal bool skip_possible_newline_for_literal(AstFile *f, bool ignore_stric
 			switch (next.kind) {
 			case Token_OpenBrace:
 			case Token_else:
-				if (build_context.strict_style && !ignore_strict_style) {
+				if (is_strict_style(f) && !ignore_strict_style) {
 					syntax_error(next, "With '-strict-style' the attached brace style (1TBS) is enforced");
 				}
 				/*fallthrough*/
@@ -1934,7 +1982,7 @@ gb_internal void assign_removal_flag_to_semicolon(AstFile *f) {
 		return;
 	}
 
-	if (build_context.strict_style || (ast_file_vet_flags(f) & VetFlag_Semicolon)) {
+	if (is_strict_style(f) || (ast_file_vet_flags(f) & VetFlag_Semicolon)) {
 		syntax_error(*prev_token, "Found unneeded semicolon");
 	}
 	prev_token->flags |= TokenFlag_Remove;
@@ -2466,6 +2514,7 @@ gb_internal Ast *parse_asm_register(AstFile *f) {
 	return reg;
 }
 gb_internal Ast *parse_asm_operand(AstFile *f, bool allow_memory_operand) {
+	Ast *operand = nullptr;
 	switch (f->curr_token.kind) {
 	case Token_Period:
 		{
@@ -2477,9 +2526,11 @@ gb_internal Ast *parse_asm_operand(AstFile *f, bool allow_memory_operand) {
 			return label_decl;
 		}
 	case Token_Ident:
-		return parse_ident(f);
+		operand = parse_ident(f);
+		break;
 	case Token_Mod:
-		return parse_asm_register(f);
+		operand = parse_asm_register(f);
+		break;
 	case Token_Integer:
 	case Token_Float:
 	case Token_Rune:
@@ -2496,6 +2547,29 @@ gb_internal Ast *parse_asm_operand(AstFile *f, bool allow_memory_operand) {
 
 	case Token_OpenParen:
 		return parse_expr(f, false);
+
+	case Token_Hash:
+		{
+			Token hash = expect_token(f, Token_Hash);
+			Token name = expect_token(f, Token_Ident);
+			if (name.string == "pre" ||
+			    name.string == "post") {
+				operand = parse_asm_operand(f, allow_memory_operand);
+				if (operand == nullptr ||
+				    operand->kind != Ast_AsmMemoryOperand) {
+					error(name, "Expected an asm memory operand after #%.*s", LIT(name.string));
+				} else {
+					GB_ASSERT(operand->kind == Ast_AsmMemoryOperand);
+					if (name.string == "pre") {
+						operand->AsmMemoryOperand.kind = AsmMemoryOperand_Pre;
+					} else if (name.string == "post") {
+						operand->AsmMemoryOperand.kind = AsmMemoryOperand_Post;
+					}
+				}
+			}
+		}
+		break;
+
 	case Token_OpenBracket:
 		if (allow_memory_operand) {
 			Token open  = expect_token(f, Token_OpenBracket);
@@ -2568,11 +2642,75 @@ gb_internal Ast *parse_asm_operand(AstFile *f, bool allow_memory_operand) {
 			return mem;
 		}
 		break;
+	case Token_OpenBrace:
+		if (allow_memory_operand) {
+			Token open  = expect_token(f, Token_OpenBrace);
+
+			Array<Ast *> registers = {};
+			registers.allocator = heap_allocator();
+			Ast *type = nullptr;
+
+			Ast *first_reg = parse_asm_operand(f, false);
+			Token range_token = {};
+			switch (f->curr_token.kind) {
+			case Token_RangeHalf:
+			case Token_RangeFull:
+				{
+					range_token = advance_token(f);
+					Ast *second_reg = parse_asm_operand(f, false);
+					array_reserve(&registers, 2);
+					array_add(&registers, first_reg);
+					array_add(&registers, second_reg);
+
+					if (allow_token(f, Token_Comma)) {
+						// allow for trailing comma
+					}
+				}
+				break;
+			default:
+				if (allow_token(f, Token_Comma)) {
+					// allow for trailing comma
+				}
+				while (f->curr_token.kind != Token_CloseBrace &&
+				       f->curr_token.kind != Token_EOF) {
+					Ast *reg = parse_asm_operand(f, false);
+					array_add(&registers, reg);
+
+					if (!allow_token(f, Token_Comma)) {
+						break;
+					}
+				}
+				break;
+			}
+			Token close = expect_token(f, Token_CloseBrace);
+			if (allow_token(f, Token_Colon)) {
+				type = parse_type(f);
+			}
+
+			Ast *rg = alloc_ast_node(f, Ast_AsmRegisterGroup);
+			rg->AsmRegisterGroup.open        = open;
+			rg->AsmRegisterGroup.registers   = registers;
+			rg->AsmRegisterGroup.range_token = range_token;
+			rg->AsmRegisterGroup.close       = close;
+			rg->AsmRegisterGroup.type        = type;
+
+			return rg;
+		}
+		break;
 	}
 
-	syntax_error(f->curr_token, "Invalid asm operand, found '%.*s'", LIT(f->curr_token.string));
-	advance_token(f);
-	return nullptr;
+	if (operand == nullptr) {
+		syntax_error(f->curr_token, "Invalid asm operand, found '%.*s'", LIT(f->curr_token.string));
+		advance_token(f);
+	} else if (f->curr_token.kind == Token_OpenBracket) {
+		f->expr_level++;
+		Token open = expect_token(f, Token_OpenBracket);
+		Ast *index = parse_asm_operand(f, false);
+		Token close = expect_token(f, Token_CloseBracket);
+		f->expr_level--;
+		operand = ast_index_expr(f, operand, index, open, close);
+	}
+	return operand;
 }
 
 gb_internal Slice<Ast *> parse_asm_operands(AstFile *f) {
@@ -2694,6 +2832,60 @@ gb_internal Ast *parse_asm_signature(AstFile *f, Token asm_token) {
 	return ast_proc_type(f, asm_token, params, results, tags, cc, is_generic, diverging);
 }
 
+gb_internal Ast *parse_asm_spec(AstFile *f) {
+	Ast *name      = parse_ident(f);
+	Ast *tied_name = nullptr;
+	Ast *type      = nullptr;
+	Ast *value     = nullptr;
+	if (allow_token(f, Token_ArrowRight)) {
+		tied_name = parse_ident(f);
+	}
+	if (allow_token(f, Token_Colon)) {
+		type = parse_type(f);
+	}
+	if (allow_token(f, Token_Eq)) {
+		if (f->curr_token.kind == Token_Ident) {
+			value = parse_ident(f);
+		} else if (f->curr_token.kind == Token_Mod) {
+			value = parse_asm_register(f);
+		} else {
+			error(f->curr_token, "Expected a register or scratch parameter");
+			Ast *dummy = parse_expr(f, true);
+			gb_unused(dummy);
+		}
+	}
+
+	if (tied_name != nullptr) {
+		if (type != nullptr) {
+			syntax_error(f->curr_token, "An asm specification for tied values cannot declare a type");
+		}
+	} else if (type == nullptr && value == nullptr) {
+		syntax_error(f->curr_token, "An asm specification must specify at least either a type or a value if the value is not tied");
+	}
+
+	Array<Ast *> directives = {};
+	directives.allocator = heap_allocator();
+
+	while (f->curr_token.kind == Token_Hash) {
+		Token token = expect_token(f, Token_Hash);
+		Token name = expect_token_after(f, Token_Ident, "hash for directive");
+		if (name.kind == Token_Ident) {
+			Ast *directive = ast_basic_directive(f, token, name);
+			array_add(&directives, directive);
+		}
+	}
+
+
+	Ast *spec = alloc_ast_node(f, Ast_AsmSpec);
+	spec->AsmSpec.name       = name;
+	spec->AsmSpec.tied_name  = tied_name;
+	spec->AsmSpec.type       = type;
+	spec->AsmSpec.value      = value;
+	spec->AsmSpec.directives = directives;
+	return spec;
+}
+
+
 gb_internal Ast *parse_asm_template(AstFile *f) {
 	Token token = expect_token(f, Token_asm);
 
@@ -2718,41 +2910,7 @@ gb_internal Ast *parse_asm_template(AstFile *f) {
 		       f->curr_token.kind != Token_EOF) {
 			Ast *spec = nullptr;
 			if (f->curr_token.kind == Token_Ident) {
-				Ast *name      = parse_ident(f);
-				Ast *tied_name = nullptr;
-				Ast *type      = nullptr;
-				Ast *value     = nullptr;
-				if (allow_token(f, Token_ArrowRight)) {
-					tied_name = parse_ident(f);
-				}
-				if (allow_token(f, Token_Colon)) {
-					type = parse_type(f);
-				}
-				if (allow_token(f, Token_Eq)) {
-					if (f->curr_token.kind == Token_Ident) {
-						value = parse_ident(f);
-					} else if (f->curr_token.kind == Token_Mod) {
-						value = parse_asm_register(f);
-					} else {
-						error(f->curr_token, "Expected a register or scratch parameter");
-						Ast *dummy = parse_expr(f, true);
-						gb_unused(dummy);
-					}
-				}
-
-				if (tied_name != nullptr) {
-					if (type != nullptr) {
-						syntax_error(f->curr_token, "An asm specification for tied values cannot declare a type");
-					}
-				} else if (type == nullptr && value == nullptr) {
-					syntax_error(f->curr_token, "An asm specification must specify at least either a type or a value if the value is not tied");
-				}
-
-				spec = alloc_ast_node(f, Ast_AsmSpec);
-				spec->AsmSpec.name      = name;
-				spec->AsmSpec.tied_name = tied_name;
-				spec->AsmSpec.type      = type;
-				spec->AsmSpec.value     = value;
+				spec = parse_asm_spec(f);
 			} else if (f->curr_token.kind == Token_Hash) {
 				Token hash = expect_token(f, Token_Hash);
 				Token name = expect_token(f, Token_Ident);
@@ -2817,10 +2975,11 @@ gb_internal Ast *parse_asm_template(AstFile *f) {
 	}
 
 	if (build_context.metrics.arch == TargetArch_amd64 ||
-	    build_context.metrics.arch == TargetArch_riscv64) {
+	    build_context.metrics.arch == TargetArch_riscv64 ||
+	    build_context.metrics.arch == TargetArch_arm64) {
 	    	// okay
 	} else {
-		syntax_error(token, "asm templates are currently only supported on -target:*_amd64 or -target:*_riscv64");
+		syntax_error(token, "asm templates are currently only supported on -target:*_amd64 or -target:*_riscv64 or -target:*_arm64");
 	}
 
 	Ast *asm_template = alloc_ast_node(f, Ast_AsmTemplate);
@@ -3586,7 +3745,7 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 			Token close = expect_token(f, Token_CloseBrace);
 
 			if (args.count == 0) {
-				syntax_error(token, "Expected a least 1 argument in a procedure group");
+				syntax_error(token, "Expected a least 1 argument in an asm group");
 			}
 
 			return ast_asm_group(f, token, open, close, args);
