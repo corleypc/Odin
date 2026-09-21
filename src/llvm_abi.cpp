@@ -15,7 +15,10 @@ struct lbArgType {
 	LLVMAttributeRef align_attribute; // Optional
 	i64 byval_alignment;
 	bool is_byval;
-	bool no_capture;
+	LLVMAttributeRef nocapture_attribute;       // Optional
+	LLVMAttributeRef nonnull_attribute;         // Optional
+	LLVMAttributeRef dereferenceable_attribute; // Optional
+	LLVMAttributeRef readonly_attribute;        // Optional
 
 	// For RiscV (Optional for others): A `cast_type` is normally applied by reinterpreting the value's 
 	// bits from offset zero. Only correct when the two layouts agree. When an ABI flattens an aggregate 
@@ -151,6 +154,14 @@ gb_internal LLVMTypeRef lb_function_type_to_llvm_raw(lbFunctionType *ft, bool is
 // }
 
 
+gb_internal LLVMAttributeRef lb_create_nocapture_attribute(LLVMContextRef c) {
+#if LLVM_VERSION_MAJOR >= 21
+	return lb_create_enum_attribute(c, "captures", 0); // 0 == CaptureInfo::none()
+#else
+	return lb_create_enum_attribute(c, "nocapture");
+#endif
+}
+
 gb_internal void lb_add_function_type_attributes(LLVMValueRef fn, lbFunctionType *ft, ProcCallingConvention calling_convention) {
 	if (ft == nullptr) {
 		return;
@@ -164,11 +175,7 @@ gb_internal void lb_add_function_type_attributes(LLVMValueRef fn, lbFunctionType
 	LLVMContextRef c = ft->ctx;
 	LLVMAttributeRef noalias_attr   = lb_create_enum_attribute(c, "noalias");
 	LLVMAttributeRef nonnull_attr   = lb_create_enum_attribute(c, "nonnull");
-#if LLVM_VERSION_MAJOR >= 21
-	LLVMAttributeRef nocapture_attr = lb_create_string_attribute(c, make_string_c("captures"), make_string_c("none"));
-#else
-	LLVMAttributeRef nocapture_attr = lb_create_enum_attribute(c, "nocapture");
-#endif
+	LLVMAttributeRef nocapture_attr = lb_create_nocapture_attribute(c);
 
 	unsigned arg_index = offset;
 	for (unsigned i = 0; i < arg_count; i++) {
@@ -183,9 +190,18 @@ gb_internal void lb_add_function_type_attributes(LLVMValueRef fn, lbFunctionType
 		if (arg->align_attribute) {
 			LLVMAddAttributeAtIndex(fn, arg_index+1, arg->align_attribute);
 		}
+		if (arg->nonnull_attribute) {
+			LLVMAddAttributeAtIndex(fn, arg_index+1, arg->nonnull_attribute);
+		}
+		if (arg->dereferenceable_attribute) {
+			LLVMAddAttributeAtIndex(fn, arg_index+1, arg->dereferenceable_attribute);
+		}
+		if (arg->readonly_attribute) {
+			LLVMAddAttributeAtIndex(fn, arg_index+1, arg->readonly_attribute);
+		}
 
-		if (arg->no_capture) {
-			LLVMAddAttributeAtIndex(fn, arg_index+1, nocapture_attr);
+		if (arg->nocapture_attribute) {
+			LLVMAddAttributeAtIndex(fn, arg_index+1, arg->nocapture_attribute);
 		}
 
 
@@ -204,6 +220,12 @@ gb_internal void lb_add_function_type_attributes(LLVMValueRef fn, lbFunctionType
 		LLVMAddAttributeAtIndex(fn, offset, noalias_attr);
 		if (ft->ret.align_attribute != nullptr) {
 			LLVMAddAttributeAtIndex(fn, offset, ft->ret.align_attribute);
+		}
+		if (ft->ret.nonnull_attribute != nullptr) {
+			LLVMAddAttributeAtIndex(fn, offset, ft->ret.nonnull_attribute);
+		}
+		if (ft->ret.dereferenceable_attribute != nullptr) {
+			LLVMAddAttributeAtIndex(fn, offset, ft->ret.dereferenceable_attribute);
 		}
 	}
 
@@ -487,7 +509,9 @@ gb_internal Type *lb_abi_single_result_type(Type *proc_type) {
 }
 
 // add the alignment of Odin controlled ptr args 
-// and of sret slots explicitly as align attributes
+// and of sret slots explicitly as align attributes,
+// plus nonnull + dereferenceable(size) on the same pointers -- both always
+// point at caller-provided storage for a whole object of the source type
 // 1) for an indirect odin/contextless arg pointing to an lvalue of the source type,
 //    the call emitter enforces alignment with a copy to a
 //    type aligned temp when the lvalue can't be proven properly aligned
@@ -501,7 +525,7 @@ gb_internal Type *lb_abi_single_result_type(Type *proc_type) {
 //    and platform/C ABIs require caller provided aligned storage
 // byval args already carry their align (set from the source type),
 // so only indirect args with no attrib are handled here
-gb_internal void lb_abi_add_indirect_source_type_alignments(lbModule *m, lbFunctionType *ft, unsigned arg_count, Type *original_type, ProcCallingConvention calling_convention) {
+gb_internal void lb_abi_add_indirect_source_type_attributes(lbModule *m, lbFunctionType *ft, unsigned arg_count, Type *original_type, ProcCallingConvention calling_convention) {
 	LLVMContextRef c = m->ctx;
 	// ignore anything that's not Type_Proc
 	Type *bt = original_type != nullptr ? base_type(original_type) : nullptr;
@@ -514,23 +538,45 @@ gb_internal void lb_abi_add_indirect_source_type_alignments(lbModule *m, lbFunct
 		auto srcs = lb_abi_param_source_types(bt, arg_count);
 		for (unsigned i = 0; i < arg_count && cast(isize)i < ft->args.count; i++) {
 			lbArgType *arg = &ft->args[i];
-			if (arg->kind != lbArg_Indirect || arg->align_attribute != nullptr) {
+			if (arg->kind != lbArg_Indirect) {
 				continue;
 			}
 			if (srcs[i] == nullptr) {
 				continue;
 			}
-			i64 align = type_align_of(srcs[i]);
-			if (align > 1) {
-				arg->align_attribute = lb_create_enum_attribute(c, "align", align);
+			// byval args carry their own align, and byval itself implies a
+			// nonnull dereferenceable source, so only the bare-indirect args
+			// need the pointer-validity attributes
+			if (!arg->is_byval) {
+				if (arg->align_attribute == nullptr) {
+					i64 align = type_align_of(srcs[i]);
+					if (align > 1) {
+						arg->align_attribute = lb_create_enum_attribute(c, "align", align);
+					}
+				}
+				// the call emitter always passes the address of a whole object of the
+				// source type (lvalue, materialized constant, or copied-out temp)
+				arg->nonnull_attribute = lb_create_enum_attribute(c, "nonnull");
+				i64 sz = type_size_of(srcs[i]);
+				if (sz > 0) {
+					arg->dereferenceable_attribute = lb_create_enum_attribute(c, "dereferenceable", sz);
+				}
 			}
+			// parameters are immutable and non-addressable, so the callee neither
+			// writes through the pointer (not even a byval callee-owned copy) nor
+			// retains it: the body only loads from it, copies out of it, or
+			// forwards it to calls that promise the same. This is what lets
+			// lb_address_from_load_if_readonly_parameter forward a param onward
+			// instead of copying it to a temporary.
+			arg->readonly_attribute = lb_create_enum_attribute(c, "readonly");
+			arg->nocapture_attribute = lb_create_nocapture_attribute(c);
 		}
 	}
 	// sret 3 cases
 	//   1 return value (the sret only)
 	//   split multiple return (sret is the only)
 	//   unsplit multiple return (take alignment of the whole tuple)
-	if (bt != nullptr && ft->ret.kind == lbArg_Indirect && ft->ret.align_attribute == nullptr) {
+	if (bt != nullptr && ft->ret.kind == lbArg_Indirect) {
 		Type *ret_src = lb_abi_single_result_type(bt);
 		if (ret_src == nullptr && bt->Proc.results != nullptr &&
 		    bt->Proc.results->Tuple.variables.count > 1) {
@@ -545,9 +591,17 @@ gb_internal void lb_abi_add_indirect_source_type_alignments(lbModule *m, lbFunct
 		}
 		// ret_src = nullptr  -> skip anything unkwnown
 		if (ret_src != nullptr) {
-			i64 align = type_align_of(ret_src);
-			if (align > 1) {
-				ft->ret.align_attribute = lb_create_enum_attribute(c, "align", align);
+			if (ft->ret.align_attribute == nullptr) {
+				i64 align = type_align_of(ret_src);
+				if (align > 1) {
+					ft->ret.align_attribute = lb_create_enum_attribute(c, "align", align);
+				}
+			}
+			// the sret slot is caller-allocated storage for the whole return value
+			ft->ret.nonnull_attribute = lb_create_enum_attribute(c, "nonnull");
+			i64 sz = type_size_of(ret_src);
+			if (sz > 0) {
+				ft->ret.dereferenceable_attribute = lb_create_enum_attribute(c, "dereferenceable", sz);
 			}
 		}
 	}
@@ -2830,7 +2884,7 @@ gb_internal LB_ABI_INFO(lb_get_abi_info) {
 		base_type(original_type)
 	);
 
-	lb_abi_add_indirect_source_type_alignments(m, ft, arg_count, original_type, calling_convention);
+	lb_abi_add_indirect_source_type_attributes(m, ft, arg_count, original_type, calling_convention);
 
 	// NOTE(bill): this is handled here rather than when developing the type in `lb_type_internal_for_procedures_raw`
 	// This is to make it consistent when and how it is handled
@@ -2839,6 +2893,15 @@ gb_internal LB_ABI_INFO(lb_get_abi_info) {
 		lbArgType context_param = lb_arg_type_direct(LLVMPointerType(LLVMInt8TypeInContext(m->ctx), 0));
 		if (t_context != nullptr) {
 			context_param.align_attribute = lb_create_enum_attribute(m->ctx, "align", type_align_of(t_context));
+			context_param.nonnull_attribute = lb_create_enum_attribute(m->ctx, "nonnull");
+			context_param.dereferenceable_attribute = lb_create_enum_attribute(m->ctx, "dereferenceable", type_size_of(t_context));
+			context_param.nocapture_attribute = lb_create_nocapture_attribute(m->ctx); // same claim the decl already makes; this carries it to call sites
+			// the incoming context is copy-on-write: the implicit-parameter entry is
+			// pushed with uses=+1, so any store to `context` copies the whole struct
+			// into a fresh local first (lb_addr_store's lbAddr_Context path), and
+			// `&context` is rejected by the checker -- the callee only ever reads
+			// through this pointer
+			context_param.readonly_attribute = lb_create_enum_attribute(m->ctx, "readonly");
 		}
 		array_add(&ft->args, context_param);
 	}

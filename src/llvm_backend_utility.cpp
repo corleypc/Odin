@@ -1046,10 +1046,9 @@ gb_internal lbValue lb_address_from_load_if_readonly_parameter(lbProcedure *p, l
 	while (optr && LLVMIsABitCastInst(optr)) {
 		optr = LLVMGetOperand(optr, 0);
 	}
+	// attribute index = raw parameter position + 1; raw_input_parameters
+	// already includes the sret parameter, so it needs no extra offset
 	LLVMAttributeIndex param_index = 1;
-	if (p->return_ptr.addr.value) {
-		param_index++;
-	}
 
 	bool is_parameter = false;
 	for (LLVMValueRef param : p->raw_input_parameters) {

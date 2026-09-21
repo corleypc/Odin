@@ -2339,6 +2339,10 @@ gb_internal LLVMTypeRef lb_type_internal_for_procedures_raw(lbModule *m, Type *t
 			ft->args[i].kind = lbArg_Indirect;
 			ft->args[i].attribute = nullptr;
 			ft->args[i].align_attribute = nullptr;
+			ft->args[i].nonnull_attribute = nullptr;
+			ft->args[i].dereferenceable_attribute = nullptr;
+			ft->args[i].readonly_attribute = nullptr;
+			ft->args[i].nocapture_attribute = nullptr;
 			ft->args[i].byval_alignment = 0;
 			ft->args[i].is_byval = false;
 		}
@@ -3264,7 +3268,7 @@ gb_internal void lb_add_proc_attribute_at_index_with_string(lbProcedure *p, isiz
 
 gb_internal void lb_add_nocapture_proc_attribute_at_index(lbProcedure *p, isize index) {
 	#if LLVM_VERSION_MAJOR >= 21
-		lb_add_proc_attribute_at_index_with_string(p, index, make_string_c("captures"), make_string_c("none"));
+		lb_add_proc_attribute_at_index(p, index, "captures", 0); // 0 == CaptureInfo::none()
 	#else
 		lb_add_proc_attribute_at_index(p, index, "nocapture");
 	#endif

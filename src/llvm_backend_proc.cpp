@@ -1126,6 +1126,12 @@ gb_internal lbValue lb_emit_call_internal(lbProcedure *p, lbValue value, lbValue
 			if (ft->ret.align_attribute != nullptr) {
 				LLVMAddCallSiteAttribute(ret, 1, ft->ret.align_attribute);
 			}
+			if (ft->ret.nonnull_attribute != nullptr) {
+				LLVMAddCallSiteAttribute(ret, 1, ft->ret.nonnull_attribute);
+			}
+			if (ft->ret.dereferenceable_attribute != nullptr) {
+				LLVMAddCallSiteAttribute(ret, 1, ft->ret.dereferenceable_attribute);
+			}
 		}
 
 		for_array(i, ft->args) {
@@ -1142,6 +1148,18 @@ gb_internal lbValue lb_emit_call_internal(lbProcedure *p, lbValue value, lbValue
 			// from the CALL, not the declaration
 			if (ft->args[i].align_attribute != nullptr) {
 				LLVMAddCallSiteAttribute(ret, param_offset, ft->args[i].align_attribute);
+			}
+			if (ft->args[i].nonnull_attribute != nullptr) {
+				LLVMAddCallSiteAttribute(ret, param_offset, ft->args[i].nonnull_attribute);
+			}
+			if (ft->args[i].dereferenceable_attribute != nullptr) {
+				LLVMAddCallSiteAttribute(ret, param_offset, ft->args[i].dereferenceable_attribute);
+			}
+			if (ft->args[i].readonly_attribute != nullptr) {
+				LLVMAddCallSiteAttribute(ret, param_offset, ft->args[i].readonly_attribute);
+			}
+			if (ft->args[i].nocapture_attribute != nullptr) {
+				LLVMAddCallSiteAttribute(ret, param_offset, ft->args[i].nocapture_attribute);
 			}
 			param_offset += 1;
 		}
@@ -1317,8 +1335,8 @@ gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> c
 					if (is_odin_cc) {
 						if (are_types_identical(original_type, t_source_code_location)) {
 							ptr = lb_address_from_load_or_generate_local(p, x);
-						// } else {
-						// 	ptr = lb_address_from_load_if_readonly_parameter(p, x);
+						} else {
+							ptr = lb_address_from_load_if_readonly_parameter(p, x);
 						}
 					}
 					if (ptr.value == nullptr) {
