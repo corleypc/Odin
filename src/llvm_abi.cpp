@@ -568,6 +568,11 @@ gb_internal void lb_abi_add_indirect_source_type_attributes(lbModule *m, lbFunct
 			// forwards it to calls that promise the same. This is what lets
 			// lb_address_from_load_if_readonly_parameter forward a param onward
 			// instead of copying it to a temporary.
+			// Two routes hand out the raw pointer without an `&` and are held to the
+			// same rule: a deferred_in_by_ptr argument is copied first (lb_emit_call),
+			// and an `any` made from a parameter points into read-only storage --
+			// writing through any.data, or keeping it past the call, breaks the
+			// readonly/nocapture promise (the optimizer will act on it at -o:speed).
 			arg->readonly_attribute = lb_create_enum_attribute(c, "readonly");
 			arg->nocapture_attribute = lb_create_nocapture_attribute(c);
 		}

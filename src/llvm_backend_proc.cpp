@@ -690,12 +690,14 @@ gb_internal void lb_begin_procedure_body(lbProcedure *p) {
 			param_offset += 1;
 		}
 
+		// all LLVM params, sret and context included, so lb_address_from_load_if_readonly_parameter
+		// can recognise the context pointer of a proc with no declared params as well
+		unsigned raw_input_parameters_count = LLVMCountParams(p->value);
+		p->raw_input_parameters = array_make<LLVMValueRef>(permanent_allocator(), raw_input_parameters_count);
+		LLVMGetParams(p->value, p->raw_input_parameters.data);
+
 		if (p->type->Proc.params != nullptr) {
 			TypeTuple *params = &p->type->Proc.params->Tuple;
-
-			unsigned raw_input_parameters_count = LLVMCountParams(p->value);
-			p->raw_input_parameters = array_make<LLVMValueRef>(permanent_allocator(), raw_input_parameters_count);
-			LLVMGetParams(p->value, p->raw_input_parameters.data);
 
 			bool is_odin_cc = is_calling_convention_odin(ft->calling_convention);
 
@@ -1257,6 +1259,37 @@ gb_internal lbValue lb_emit_conjugate(lbProcedure *p, lbValue val, Type *type) {
 	return lb_emit_load(p, res);
 }
 
+// true when 'ptr' points into an indirect by-value parameter (or a field of one) or into the
+// implicit context: both are immutable, so a writable pointer to them must never be handed out
+gb_internal bool lb_is_pointer_into_by_value_parameter(lbProcedure *p, LLVMValueRef ptr) {
+	// walk ptr back through any GEPs before checking if it is an arg of the proc,
+	// so that fields are handled too
+	while (LLVMIsAGetElementPtrInst(ptr)) {
+		ptr = LLVMGetOperand(ptr, 0);
+	}
+	if (!LLVMIsAArgument(ptr) || LLVMGetParamParent(ptr) != p->value) {
+		return false;
+	}
+	if (p->type->Proc.calling_convention == ProcCC_Odin &&
+	    ptr == LLVMGetParam(p->value, LLVMCountParams(p->value)-1)) {
+		return true; // the implicit context
+	}
+	bool found = false;
+	if (p->type->Proc.params != nullptr) {
+		TypeTuple *params = &p->type->Proc.params->Tuple;
+		rw_mutex_shared_lock(&p->module->values_mutex);
+		for_array(i, params->variables) {
+			lbValue *v = map_get(&p->module->values, params->variables[i]);
+			if (v != nullptr && v->value == ptr) {
+				found = true; // an indirect by-value parameter used in place; direct ones register an alloca
+				break;
+			}
+		}
+		rw_mutex_shared_unlock(&p->module->values_mutex);
+	}
+	return found;
+}
+
 gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> const &args, ProcInlining inlining, ProcTailing tailing, lbValue *sret_dst) {
 	lbModule *m = p->module;
 
@@ -1504,7 +1537,14 @@ gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> c
 			}
 			if (by_ptr) {
 				for_array(i, result_as_args) {
-					lbValue arg_ptr = lb_address_from_load_or_generate_local(p, result_as_args[i]);
+					lbValue arg = result_as_args[i];
+					lbValue arg_ptr = lb_address_from_load_or_generate_local(p, arg);
+					if (lb_is_pointer_into_by_value_parameter(p, arg_ptr.value)) {
+						// the deferred procedure gets a copy, never a writable pointer into the caller's memory
+						lbAddr copy = lb_add_local_generated(p, arg.type, false);
+						lb_addr_store(p, copy, arg);
+						arg_ptr = copy.addr;
+					}
 					result_as_args[i] = arg_ptr;
 				}
 			}
