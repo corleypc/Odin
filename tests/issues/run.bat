@@ -25,6 +25,7 @@ set COMMON=-define:ODIN_TEST_FANCY=false -file -vet -strict-style -ignore-unused
 ..\..\..\odin build ..\test_issue_5043.odin %COMMON% || exit /b
 ..\..\..\odin build ..\test_issue_5097.odin %COMMON% || exit /b
 ..\..\..\odin build ..\test_issue_5097-2.odin %COMMON% || exit /b
+..\..\..\odin check ..\test_issue_5105_5569.odin %COMMON% 2>&1 | find /c "Error:" | findstr /x "4" || exit /b
 ..\..\..\odin build ..\test_issue_5265.odin %COMMON% || exit /b
 ..\..\..\odin test ..\test_issue_5318.odin %COMMON%  || exit /b
 ..\..\..\odin build ..\test_issue_5573.odin %COMMON% 2>&1 | find /c "Error:" | findstr /x "2" || exit /b
@@ -53,6 +54,7 @@ set COMMON=-define:ODIN_TEST_FANCY=false -file -vet -strict-style -ignore-unused
 ..\..\..\odin check ..\test_issue_ellipsis_type_call.odin -no-entry-point %COMMON% 2>&1 | find /c "Error:" | findstr /x "10" || exit /b
 ..\..\..\odin check ..\test_issue_foreign_redeclaration.odin -no-entry-point %COMMON% || exit /b
 ..\..\..\odin check ..\test_issue_foreign_redeclaration_mismatch.odin -no-entry-point %COMMON% 2>&1 | find /c "Error:" | findstr /x "1" || exit /b
+..\..\..\odin check ..\test_issue_integer_literal_exponent.odin -no-entry-point %COMMON% 2>&1 | find /c "Error:" | findstr /x "1" || exit /b
 ..\..\..\odin doc ..\test_issue_asm_doc_category.odin -file 2>&1 | find /c "asm templates" | findstr /x "1" || exit /b
 ..\..\..\odin build ..\test_issue_7037.odin %COMMON% -o:none  || exit /b
 ..\..\..\odin test ..\test_issue_7421.odin %COMMON% || exit /b
@@ -65,6 +67,7 @@ clang -c ..\test_issue_sysv_abi.c -o test_issue_sysv_abi_c.o || exit /b
 ..\..\..\odin test ..\test_lifetime_markers.odin %COMMON% -o:size -lifetime-markers  || exit /b
 ..\..\..\odin test ..\test_lifetime_markers.odin %COMMON% -o:speed -lifetime-markers  || exit /b
 ..\..\..\odin test ..\test_issue_7547.odin %COMMON%  || exit /b
+..\..\..\odin test ..\test_issue_7477_7506.odin %COMMON%  || exit /b
 ..\..\..\odin run ..\test_issue_7482.odin %COMMON% || exit /b
 ..\..\..\odin run ..\test_issue_7562.odin %COMMON% -no-crt -no-thread-local || exit /b
 ..\..\..\odin run ..\test_issue_7562.odin %COMMON% -no-crt -no-thread-local -o:speed || exit /b
