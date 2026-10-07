@@ -433,6 +433,78 @@ gb_internal lbArgType lb_abi_modify_return_is_tuple(lbFunctionType *ft, LLVMCont
 	}                                                                                                           \
 } while (0)
 
+// x64 tuple returns to be used for the Odin CCs;
+// LLVM's x64 return convention (same on SysV and Win64)
+// places the scalars of an aggregate in rax, rdx, rcx and xmm0, xmm1, a few additional floats can go to x87
+// and after that LLVM gives up and falls back to an sret ptr for the whole return.
+// (We don't want to touch x87 with a stick, so for floats we bail out as soon as the xmm registers are gone.)
+// The function recurses a tuple to its leaves; if all leaves are
+// integers, pointers, floats and vectors of <= 16 bytes and stay within the register budget
+// the tuple is returned as an LLVM struct, each leaf in its own register (without packing).
+// Examples: (i32, i32) comes back in eax:edx, ([]T, bool) in rax, rdx, cl.
+// A tuple with an array leaf of more than one element is rejected here
+// (LLVM would give each element its own register).
+// NOTE: a module can type one byte of padding as either i8 or [1 x i8],
+// so a one-element array is counted as the element to keep caller and callee in agreement.
+gb_internal bool lb_amd64_tuple_count_return_regs(LLVMTypeRef t, i32 *gpr, i32 *xmm) {
+	switch (LLVMGetTypeKind(t)) {
+	case LLVMStructTypeKind: {
+		unsigned n = LLVMCountStructElementTypes(t);
+		for (unsigned i = 0; i < n; i++) {
+			if (!lb_amd64_tuple_count_return_regs(LLVMStructGetTypeAtIndex(t, i), gpr, xmm)) {
+				return false;
+			}
+		}
+		return true;
+	}
+	case LLVMArrayTypeKind:
+		// one element arrays only
+		return LLVMGetArrayLength(t) == 1 && lb_amd64_tuple_count_return_regs(OdinLLVMGetArrayElementType(t), gpr, xmm);
+	case LLVMIntegerTypeKind:
+		*gpr += cast(i32)((lb_sizeof(t) + 7) / 8);
+		return *gpr <= 3;
+	case LLVMPointerTypeKind:
+		*gpr += 1;
+		return *gpr <= 3;
+	case LLVMHalfTypeKind:
+	case LLVMFloatTypeKind:
+	case LLVMDoubleTypeKind:
+		*xmm += 1;
+		return *xmm <= 2;
+	case LLVMVectorTypeKind:
+		*xmm += 1;
+		return lb_sizeof(t) <= 16 && *xmm <= 2;
+	default:
+		return false;
+	}
+}
+
+namespace lbAbiAmd64SysV {
+	// a tuple of <= 16 bytes that lb_amd64_tuple_count_return_regs rejects is classified
+	// like a SysV C struct of the same layout (defined with the classifier below);
+	// Win64 uses it too for the Odin CC (not a bug!)
+	gb_internal lbArgType classify_small_tuple_return(LLVMContextRef c, LLVMTypeRef return_type, ProcCallingConvention calling_convention);
+}
+
+// returns the in-register ABI type of an Odin CC tuple return on x86-64, or an empty lbArgType
+// (rejected), which falls back to lb_abi_modify_return_is_tuple (out pointers) downstream
+gb_internal lbArgType lb_amd64_tuple_return_in_regs(LLVMContextRef c, LLVMTypeRef return_type, ProcCallingConvention calling_convention) {
+	// a tuple of 2+ values is always an LLVM struct
+	GB_ASSERT(lb_is_type_kind(return_type, LLVMStructTypeKind) && LLVMCountStructElementTypes(return_type) >= 2);
+	i32 gpr = 0;
+	i32 xmm = 0;
+	if (lb_amd64_tuple_count_return_regs(return_type, &gpr, &xmm)) {
+		return lb_arg_type_direct(return_type);
+	}
+	if (lb_sizeof(return_type) <= 16) {
+		lbArgType classified = lbAbiAmd64SysV::classify_small_tuple_return(c, return_type, calling_convention);
+		if (classified.kind != lbArg_Indirect) {
+			return classified;
+		}
+	}
+	return {};
+}
+
 // NOTE(bill): I hate `namespace` in C++ but this is just because I don't want to prefix everything
 
 // Every psABI except AAPCS64 and Win64 makes the caller widen a sub-word integer to 32 bits, in
@@ -640,8 +712,8 @@ namespace lbAbiAmd64Win64 {
 		lbFunctionType *ft = permanent_alloc_item<lbFunctionType>();
 		ft->ctx = c;
 		ft->args = compute_arg_types(c, arg_types, arg_count, original_type);
+		ft->calling_convention = calling_convention; // read by the tuple classification below
 		ft->ret = compute_return_type(ft, c, return_type, return_is_defined, return_is_tuple);
-		ft->calling_convention = calling_convention;
 		return ft;
 	}
 
@@ -675,6 +747,14 @@ namespace lbAbiAmd64Win64 {
 		if (!return_is_defined) {
 			return lb_arg_type_direct(LLVMVoidTypeInContext(c));
 		} else if (lb_is_type_kind(return_type, LLVMStructTypeKind) || lb_is_type_kind(return_type, LLVMArrayTypeKind)) {
+			if (return_is_tuple) {
+				// ahead of the 1/2/4/8 switch, which would otherwise pack `(f32, f32)` into one GPR
+				lbArgType in_regs = lb_amd64_tuple_return_in_regs(c, return_type, ft->calling_convention);
+				if (in_regs.type != nullptr) {
+					return in_regs;
+				}
+			}
+
 			i64 sz = lb_sizeof(return_type);
 			switch (sz) {
 			case 1: return lb_arg_type_direct(return_type, LLVMIntTypeInContext(c,  8), nullptr, nullptr);
@@ -771,9 +851,21 @@ namespace lbAbiAmd64SysV {
 	gb_internal Array<RegClass> classify(LLVMTypeRef t, Type *source_type);
 	gb_internal LLVMTypeRef llreg(LLVMContextRef c, Array<RegClass> const &reg_classes, LLVMTypeRef type);
 
+	gb_internal lbArgType classify_small_tuple_return(LLVMContextRef c, LLVMTypeRef return_type, ProcCallingConvention calling_convention) {
+		return amd64_type(c, return_type, Amd64TypeAttribute_StructRect, calling_convention,
+		                  false,
+		                  nullptr, nullptr, nullptr);
+	}
+
 	gb_internal LB_ABI_COMPUTE_RETURN_TYPE(compute_return_type) {
 		if (!return_is_defined) {
 			return lb_arg_type_direct(LLVMVoidTypeInContext(c));
+		}
+		if (return_is_tuple) {
+			lbArgType in_regs = lb_amd64_tuple_return_in_regs(c, return_type, ft->calling_convention);
+			if (in_regs.type != nullptr) {
+				return in_regs;
+			}
 		}
 		LB_ABI_MODIFY_RETURN_IF_TUPLE_MACRO();
 

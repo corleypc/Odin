@@ -130,20 +130,11 @@ gb_internal LLVMMetadataRef lb_debug_type_internal_proc(lbModule *m, Type *type)
 			single_ret = t_rawptr;
 		}
 		if (is_type_tuple(single_ret) && is_calling_convention_odin(type->Proc.calling_convention)) {
-			LLVMTypeRef actual = lb_type_internal_for_procedures_raw(m, type);
-			actual = LLVMGetReturnType(actual);
-			if (actual == nullptr) {
-				// results were passed as a single pointer
-				parameters[0] = lb_debug_procedure_parameters(m, single_ret);
+			lbFunctionType *ft = lb_get_function_type(m, type);
+			if (ft->multiple_return_original_type != nullptr) {
+				return_is_tuple = true;
 			} else {
-				LLVMTypeRef possible = lb_type(m, type->Proc.results);
-				if (possible == actual) {
-					// results were returned directly
-					parameters[0] = lb_debug_procedure_parameters(m, single_ret);
-				} else {
-					// resulsts were returned separately
-					return_is_tuple = true;
-				}
+				parameters[0] = lb_debug_procedure_parameters(m, single_ret);
 			}
 		} else {
 			parameters[0] = lb_debug_procedure_parameters(m, single_ret);
