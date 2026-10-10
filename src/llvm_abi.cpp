@@ -150,12 +150,21 @@ gb_internal LLVMTypeRef lb_function_type_to_llvm_raw(lbFunctionType *ft, bool is
 // 	return LLVMPointerType(func_type, 0);
 // }
 
+gb_internal bool lb_odin_cc_uses_sysv_on_win64(ProcCallingConvention cc) {
+	return is_calling_convention_odin(cc) &&
+	       build_context.metrics.arch == TargetArch_amd64 &&
+	       build_context.metrics.os == TargetOs_windows;
+}
+
 gb_internal lbCallingConventionKind lb_calling_convention_kind(ProcCallingConvention cc) {
 	if (selected_subtarget == Subtarget_Playdate) {
 		return lbCallingConvention_ARM_AAPCS_VFP;
 	}
 	if (is_arch_wasm()) {
 		return lbCallingConvention_C;
+	}
+	if (lb_odin_cc_uses_sysv_on_win64(cc)) {
+		return lbCallingConvention_X86_64_SysV;
 	}
 	return lb_calling_convention_map[cc];
 }
@@ -899,9 +908,161 @@ namespace lbAbiAmd64SysV {
 		return false;
 	};
 
+	// pass and return an 8-, 12- or 16-byte array of 2+ floats (f32 or f64) as one
+	// <N x T>, a single xmm register (SysV otherwise splits 12- and 16-byte into ({ <2 x float>, <2 x float> },
+	// { <2 x float>, float }, { double, double }); LLVM widens the 12-byte <3 x float> to a full register
+	gb_internal LLVMTypeRef odin_cc_array_vector_type(LLVMTypeRef type, ProcCallingConvention calling_convention) {
+		if (!is_calling_convention_odin(calling_convention) || LLVMGetTypeKind(type) != LLVMArrayTypeKind) {
+			return nullptr;
+		}
+		unsigned len = LLVMGetArrayLength(type);
+		LLVMTypeRef elem = OdinLLVMGetArrayElementType(type);
+		i64 sz = lb_sizeof(type);
+		if (len < 2 || (sz != 8 && sz != 12 && sz != 16)) {
+			return nullptr;
+		}
+		switch (LLVMGetTypeKind(elem)) {
+		case LLVMFloatTypeKind:
+		case LLVMDoubleTypeKind:
+			break;
+		default:
+			return nullptr;
+		}
+		return LLVMVectorType(elem, len);
+	}
+
+#define ODIN_CC_FLOAT_VECTOR_RETURN
+#if defined(ODIN_CC_FLOAT_VECTOR_RETURN)
+	// count the scalar float leaves of a type;
+	// false when a leaf is not float/double or differs from the first found leaf (kind);
+	// (padding shows up as a byte array or a vector tail and fails)
+	gb_internal bool odin_cc_float_leaves(LLVMTypeRef type, LLVMTypeRef *kind, i64 *count) {
+		switch (LLVMGetTypeKind(type)) {
+		case LLVMFloatTypeKind:
+		case LLVMDoubleTypeKind:
+			if (*kind != nullptr && *kind != type) {
+				return false;
+			}
+			*kind = type;
+			*count += 1;
+			return true;
+		case LLVMVectorTypeKind: {
+			i64 before = *count;
+			if (!odin_cc_float_leaves(LLVMGetElementType(type), kind, count)) {
+				return false;
+			}
+			*count = before + LLVMGetVectorSize(type);
+			return true;
+		}
+		case LLVMArrayTypeKind: {
+			unsigned len = LLVMGetArrayLength(type);
+			i64 before = *count;
+			if (len == 0 || !odin_cc_float_leaves(OdinLLVMGetArrayElementType(type), kind, count)) {
+				return false;
+			}
+			*count = before + (*count - before) * len;
+			return true;
+		}
+		case LLVMStructTypeKind: {
+			unsigned n = LLVMCountStructElementTypes(type);
+			for (unsigned i = 0; i < n; i++) {
+				if (!odin_cc_float_leaves(LLVMStructGetTypeAtIndex(type, i), kind, count)) {
+					return false;
+				}
+			}
+			return n > 0;
+		}
+		}
+		return false;
+	}
+
+	// return a 17- to 64-byte aggregate made of only f32s or only f64s, with no padding,
+	// as 16-byte vectors in consecutive XMM registers (SysV would return through memory);
+	// a remainder under 16 bytes (3 x f32, 2 x f32, f32, f64) always goes in xmm0;
+	// any result that needs more than xmm0-xmm3 stays by ptr
+	gb_internal bool odin_cc_float_vector_return_type(LLVMContextRef c, LLVMTypeRef type, ProcCallingConvention calling_convention, lbArgType *out) {
+		if (!is_calling_convention_odin(calling_convention)) {
+			return false;
+		}
+		i64 sz = lb_sizeof(type);
+		if (sz <= 16 || sz > 64) {
+			return false;
+		}
+		LLVMTypeRef kind = nullptr;
+		i64 count = 0;
+		if (!odin_cc_float_leaves(type, &kind, &count)) {
+			return false;
+		}
+		i64 elem_size = lb_sizeof(kind);
+		if (count * elem_size != sz) {
+			return false;
+		}
+
+		LLVMTypeRef chunks[8] = {};
+		i64 offsets[8] = {};
+		i32 n = 0;
+		i64 lanes = 16 / elem_size;
+		for (i64 left = count, off = 0; left > 0; n++) {
+			// the remainder is one chunk
+			i64 take = left >= lanes ? lanes : left;
+			chunks[n]  = take == 1 ? kind : LLVMVectorType(kind, cast(unsigned)take);
+			offsets[n] = off;
+			off  += take * elem_size;
+			left -= take;
+		}
+
+		if (n > 4) {
+			return false;
+		}
+
+		// the last chunk might be a scalar;
+		// LLVM returns float/double in xmm0 and xmm1, and sends
+		// a 3rd or 4th scalar through x87, so our scalar goes first (xmm0),
+		// and the vectors follow in xmm1-xmm3;
+		// the offsets keep each chunk's real place.
+		if (n > 1 && chunks[n-1] == kind) {
+			LLVMTypeRef tail_type = chunks[n-1];
+			i64 tail_offset = offsets[n-1];
+			for (i32 i = n-1; i > 0; i--) {
+				chunks[i]  = chunks[i-1];
+				offsets[i] = offsets[i-1];
+			}
+			chunks[0]  = tail_type;
+			offsets[0] = tail_offset;
+		}
+
+		Slice<i64> offs = slice_make<i64>(permanent_allocator(), n);
+		for (i32 i = 0; i < n; i++) {
+			offs[i] = offsets[i];
+		}
+		*out = lb_arg_type_direct_fields(type, LLVMStructTypeInContext(c, chunks, n, false), offs);
+		return true;
+	}
+#endif
+
 	gb_internal lbArgType amd64_type(LLVMContextRef c, LLVMTypeRef type, Amd64TypeAttributeKind attribute_kind, ProcCallingConvention calling_convention,
 	                                 bool is_arg,
 	                                 i32 *int_regs, i32 *sse_regs, Type *source_type) {
+		if (LLVMTypeRef vector_type = odin_cc_array_vector_type(type, calling_convention)) {
+			if (sse_regs) {
+				*sse_regs = gb_max(*sse_regs - 1, 0);
+			}
+			if (lb_sizeof(type) == 12) {
+				// treat as a field at offset 0
+				Slice<i64> offs = slice_make<i64>(permanent_allocator(), 1);
+				offs[0] = 0;
+				return lb_arg_type_direct_fields(type, vector_type, offs);
+			}
+			return lb_arg_type_direct(type, vector_type, nullptr, nullptr);
+		}
+#if defined(ODIN_CC_FLOAT_VECTOR_RETURN)
+		if (!is_arg) {
+			lbArgType wide = {};
+			if (odin_cc_float_vector_return_type(c, type, calling_convention, &wide)) {
+				return wide;
+			}
+		}
+#endif
 		auto cls = classify(type, source_type);
 		i32 needed_int = 0;
 		i32 needed_sse = 0;
@@ -2725,7 +2886,9 @@ gb_internal LB_ABI_INFO(lb_get_abi_info_internal) {
 
 	switch (build_context.metrics.arch) {
 	case TargetArch_amd64:
-		if (build_context.metrics.os == TargetOs_windows) {
+		if (lb_odin_cc_uses_sysv_on_win64(calling_convention)) {
+			return lbAbiAmd64SysV::abi_info(m, arg_types, arg_count, return_type, return_is_defined, return_is_tuple, calling_convention, original_type);
+		} else if (build_context.metrics.os == TargetOs_windows) {
 			return lbAbiAmd64Win64::abi_info(m, arg_types, arg_count, return_type, return_is_defined, return_is_tuple, calling_convention, original_type);
 		} else if (build_context.metrics.abi == TargetABI_Win64) {
 			return lbAbiAmd64Win64::abi_info(m, arg_types, arg_count, return_type, return_is_defined, return_is_tuple, calling_convention, original_type);

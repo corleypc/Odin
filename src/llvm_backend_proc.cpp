@@ -944,6 +944,17 @@ gb_internal Array<lbValue> lb_value_to_array(lbProcedure *p, gbAllocator const &
 
 
 
+// the alignment an element of a coerced value has at offset into an object aligned to
+// base_align (capped by what the object's alignment and the offset guarantee);
+// e.g. a 16-byte vector element must not claim 16 when inside a 4-aligned [9]f32.
+gb_internal unsigned lb_coerce_field_alignment(i64 base_align, LLVMTypeRef elem, i64 offset) {
+	i64 align = gb_min(base_align, lb_alignof(elem));
+	while (align > 1 && (offset % align) != 0) {
+		align /= 2;
+	}
+	return cast(unsigned)gb_max(align, 1);
+}
+
 // A `cast_type` is normally applied by reinterpreting the value's bits from offset zero. When the
 // ABI flattened an aggregate and dropped padding, the dense type it produced puts the survivors at
 // different offsets than they really have, and these two read and write them where they actually
@@ -953,13 +964,18 @@ gb_internal LLVMValueRef lb_coerce_fields_load(lbProcedure *p, lbValue x, lbArgT
 	LLVMTypeRef i8   = LLVMInt8TypeInContext(ctx);
 	LLVMTypeRef i64t = LLVMInt64TypeInContext(ctx);
 
+	// value loaded from memory is only as aligned as that load says
+	i64 base_align = lb_alignof(lb_type(p->module, x.type));
+	if (!p->in_multi_assignment && LLVMIsALoadInst(x.value)) {
+		base_align = gb_max(LLVMGetAlignment(x.value), 1);
+	}
 	lbValue base = lb_address_from_load_or_generate_local(p, x);
 
 	if (LLVMGetTypeKind(arg->cast_type) != LLVMStructTypeKind) {
 		GB_ASSERT(arg->coerce_offsets.count == 1);
 		LLVMValueRef index = LLVMConstInt(i64t, cast(unsigned long long)arg->coerce_offsets[0], false);
 		LLVMValueRef ptr   = LLVMBuildInBoundsGEP2(p->builder, i8, base.value, &index, 1, "");
-		return LLVMBuildLoad2(p->builder, arg->cast_type, ptr, "");
+		return OdinLLVMBuildLoadAligned(p, arg->cast_type, ptr, lb_coerce_field_alignment(base_align, arg->cast_type, arg->coerce_offsets[0]));
 	}
 
 	unsigned count = LLVMCountStructElementTypes(arg->cast_type);
@@ -969,7 +985,7 @@ gb_internal LLVMValueRef lb_coerce_fields_load(lbProcedure *p, lbValue x, lbArgT
 		LLVMTypeRef elem_type = LLVMStructGetTypeAtIndex(arg->cast_type, i);
 		LLVMValueRef index = LLVMConstInt(i64t, cast(unsigned long long)arg->coerce_offsets[i], false);
 		LLVMValueRef ptr   = LLVMBuildInBoundsGEP2(p->builder, i8, base.value, &index, 1, "");
-		LLVMValueRef elem  = LLVMBuildLoad2(p->builder, elem_type, ptr, "");
+		LLVMValueRef elem  = OdinLLVMBuildLoadAligned(p, elem_type, ptr, lb_coerce_field_alignment(base_align, elem_type, arg->coerce_offsets[i]));
 		result = LLVMBuildInsertValue(p->builder, result, elem, i, "");
 	}
 	return result;
@@ -993,7 +1009,8 @@ gb_internal LLVMValueRef lb_coerce_fields_store(lbProcedure *p, LLVMValueRef coe
 		LLVMValueRef elem  = is_struct ? LLVMBuildExtractValue(p->builder, coerced, i, "") : coerced;
 		LLVMValueRef index = LLVMConstInt(i64t, cast(unsigned long long)arg->coerce_offsets[i], false);
 		LLVMValueRef ptr   = LLVMBuildInBoundsGEP2(p->builder, i8, slot.addr.value, &index, 1, "");
-		LLVMBuildStore(p->builder, elem, ptr);
+		LLVMValueRef store = LLVMBuildStore(p->builder, elem, ptr);
+		LLVMSetAlignment(store, lb_coerce_field_alignment(lb_alignof(lb_type(p->module, original_type)), LLVMTypeOf(elem), arg->coerce_offsets[i]));
 	}
 	return lb_addr_load(p, slot).value;
 }
