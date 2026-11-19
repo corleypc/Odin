@@ -402,6 +402,7 @@ buffer_write_to :: proc(b: ^Buffer, w: io.Writer) -> (n: i64, err: io.Error) {
 
 buffer_read_from :: proc(b: ^Buffer, r: io.Reader) -> (n: i64, err: io.Error) #no_bounds_check {
 	b.last_read = .Invalid
+	stalled := 0
 	for {
 		i := _buffer_grow(b, MIN_READ)
 		resize(&b.buf, i)
@@ -419,6 +420,15 @@ buffer_read_from :: proc(b: ^Buffer, r: io.Reader) -> (n: i64, err: io.Error) #n
 		if e != nil {
 			err = e
 			return
+		}
+		if m > 0 {
+			stalled = 0
+		} else {
+			stalled += 1
+			if stalled > 100 {
+				err = .No_Progress
+				return
+			}
 		}
 	}
 	return

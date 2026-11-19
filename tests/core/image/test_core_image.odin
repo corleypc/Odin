@@ -26,9 +26,12 @@ import "core:strings"
 import "core:mem"
 import "core:time"
 
+SLIM_TESTS :: #config(ODIN_TEST_SLIM, ODIN_ARCH == .riscv64)
+
 TEST_SUITE_PATH_PNG :: ODIN_ROOT + "tests/core/assets/PNG"
 TEST_SUITE_PATH_BMP :: ODIN_ROOT + "tests/core/assets/BMP"
 TEST_SUITE_PATH_JPG :: ODIN_ROOT + "tests/core/assets/JPG"
+TEST_SUITE_PATH_BNG :: ODIN_ROOT + "tests/core/assets/BNG"
 
 I_Error :: image.Error
 
@@ -2396,20 +2399,21 @@ run_bmp_suite :: proc(t: ^testing.T, suite: []Test) {
 Basic_JPG_Tests := []Test{
 	{
 		"emblem-1024", {
-			{Default,   nil, {1024, 1024, 3, 8}, 0x_46a29e0f},
-			{Alpha_Add, nil, {1024, 1024, 4, 8}, 0x_cae2d532},
+			{Default,   nil, {1024, 1024, 3, 8}, 0x_b2eb4ed9},
+			{Alpha_Add, nil, {1024, 1024, 4, 8}, 0x_c44eff16},
 		},
 	},
 	{
 		"emblem-1024-progressive", {
-			{Default,   .Unsupported_Frame_Type, {1024, 1024, 3, 8}, 0x_46a29e0f},
+			{Default,   nil, {1024, 1024, 3, 8}, 0x_b2eb4ed9},
+			{Alpha_Add, nil, {1024, 1024, 4, 8}, 0x_c44eff16},
 		},
 	},
 	{
 		"emblem-1024-gray", {
-			{Default,              nil,                 {1024, 1024, 3, 8}, 0x_4115d669},
-			{Alpha_Add,            nil,                 {1024, 1024, 4, 8}, 0x_db496297},
-			{No_Channel_Expansion, .Unsupported_Option, {1024, 1024, 1, 8}, 0},
+			{Default,              nil, {1024, 1024, 3, 8}, 0x_379a135a},
+			{Alpha_Add,            nil, {1024, 1024, 4, 8}, 0x_be8e5529},
+			{No_Channel_Expansion, nil, {1024, 1024, 1, 8}, 0x_75a319d0},
 		},
 	},
 }

@@ -49,6 +49,45 @@ test_align_bumping_block_limit :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_arena_temp_end_without_block :: proc(t: ^testing.T) {
+	a: runtime.Arena
+	a.minimum_block_size = 64*mem.Kilobyte
+	defer runtime.arena_destroy(&a)
+
+	temp  := runtime.arena_temp_begin(&a)
+	first := []byte{}
+	for i in 0..<3 {
+		data, err := runtime.arena_alloc(&a, 40*mem.Kilobyte, 16)
+		testing.expect_value(t, err, nil)
+		mem.set(raw_data(data), 0xAA, len(data))
+		if i == 0 {
+			first = data
+		}
+	}
+	runtime.arena_temp_end(temp)
+	testing.expect_value(t, a.total_used, 0)
+	testing.expect(t, a.curr_block.prev == nil, "the temp kept the blocks it chained")
+
+	again, err := runtime.arena_alloc(&a, 40*mem.Kilobyte, 16)
+	testing.expect_value(t, err, nil)
+	testing.expect(t, raw_data(again) == raw_data(first), "the first block was not reused")
+	testing.expect(t, slice.all_of(again, 0), "the reused memory is not zero")
+}
+
+@(test)
+test_arena_zero_alignment :: proc(t: ^testing.T) {
+	a: runtime.Arena
+	testing.expect_value(t, runtime.arena_init(&a, 64*mem.Kilobyte, runtime.default_allocator()), nil)
+	defer runtime.arena_destroy(&a)
+
+	block := a.curr_block
+	data, err := runtime.arena_alloc(&a, 64, 0)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, len(data), 64)
+	testing.expect(t, a.curr_block == block, "an alignment of 0 chained a new block")
+}
+
+@(test)
 test_temp_allocator_returns_correct_size :: proc(t: ^testing.T) {
 	arena: runtime.Arena
 	context.allocator = runtime.arena_allocator(&arena)
@@ -160,20 +199,20 @@ test_map_get :: proc(t: ^testing.T) {
 
 	// small keys; value bigger than a chacheline
 	{
-		m := map[int][9]int{
-			1 = [9]int{10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000},
-			2 = [9]int{20, 200, 2000, 20000, 200000, 2000000, 20000000, 200000000, 2000000000},
-			3 = [9]int{30, 300, 3000, 30000, 300000, 3000000, 30000000, 300000000, 3000000000},
+		m := map[int][9]i64{
+			1 = [9]i64{10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000},
+			2 = [9]i64{20, 200, 2000, 20000, 200000, 2000000, 20000000, 200000000, 2000000000},
+			3 = [9]i64{30, 300, 3000, 30000, 300000, 3000000, 30000000, 300000000, 3000000000},
 		}
 		defer delete(m)
 		check(t, m)
 	}
 	// keys bigger than a chacheline; small values
 	{
-		m := map[[9]int]int{
-			[9]int{10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000} = 1,
-			[9]int{20, 200, 2000, 20000, 200000, 2000000, 20000000, 200000000, 2000000000} = 2,
-			[9]int{30, 300, 3000, 30000, 300000, 3000000, 30000000, 300000000, 3000000000} = 3,
+		m := map[[9]i64]int{
+			[9]i64{10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000} = 1,
+			[9]i64{20, 200, 2000, 20000, 200000, 2000000, 20000000, 200000000, 2000000000} = 2,
+			[9]i64{30, 300, 3000, 30000, 300000, 3000000, 30000000, 300000000, 3000000000} = 3,
 		}
 		defer delete(m)
 		check(t, m)

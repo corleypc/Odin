@@ -25,25 +25,17 @@ import win32 "core:sys/windows"
 
 @(private="file") stop_runner_flag: int
 
-@(private="file") stop_test_gate:   sync.Mutex
+@(private="file") stop_test_gate:   sync.Atomic_Mutex
 @(private="file") stop_test_index:  int
 @(private="file") stop_test_signal: win32.DWORD
 @(private="file") stop_test_passed: bool
 @(private="file") stop_test_alert:  int
 
 
-when ODIN_ARCH == .i386 {
-	// Thread-local storage is problematic on Windows i386
-	@(private="file")
-	local_test_index: int
-	@(private="file")
-	local_test_index_set: bool
-} else {
-	@(private="file", thread_local)
-	local_test_index: int
-	@(private="file", thread_local)
-	local_test_index_set: bool
-}
+@(private="file", thread_local)
+local_test_index: int
+@(private="file", thread_local)
+local_test_index_set: bool
 
 
 @(private="file")
@@ -82,6 +74,13 @@ stop_test_callback :: proc "system" (info: ^win32.EXCEPTION_POINTERS) -> win32.L
 		// Ignore informational status codes
 		return win32.EXCEPTION_CONTINUE_SEARCH
 	}
+	if code & 0x2000_0000 != 0 {
+		// Ignore customer codes: software exceptions that code raises on purpose and usually catches itself, such as C++
+		// exceptions (0xE06D7363), which GPU drivers and shader compilers throw and catch during normal operation.
+		// A vectored handler sees them before any handler of their own, so stopping the test here would kill a thread
+		// that holds the thrower's locks. One that nothing catches ends the process anyway (std::terminate).
+		return win32.EXCEPTION_CONTINUE_SEARCH
+	}
 
 
 	if local_test_index == -1 {
@@ -91,7 +90,7 @@ stop_test_callback :: proc "system" (info: ^win32.EXCEPTION_POINTERS) -> win32.L
 		// The most we can do now is make sure the user's cursor is visible,
 		// nuke the entire processs, and hope a useful core dump survives.
 		if !global_ansi_disabled {
-			show_cursor := ansi.CSI + ansi.DECTCEM_SHOW
+			show_cursor := ansi.show_cursor()
 			os.write_string(os.stdout, show_cursor)
 			os.flush(os.stdout)
 		}
@@ -133,7 +132,7 @@ stop_test_signal_callback :: proc "c" (sig: libc.int) {
 
 @(private="file")
 stop_test :: proc(code: win32.DWORD) -> ! {
-	sync.mutex_lock(&stop_test_gate)
+	sync.atomic_mutex_lock(&stop_test_gate)
 
 	intrinsics.atomic_store(&stop_test_index, local_test_index)
 	intrinsics.atomic_store(&stop_test_signal, code)
@@ -208,7 +207,7 @@ _should_stop_runner :: proc() -> bool {
 @(private="file")
 unlock_stop_test_gate :: proc(_: int, _: Stop_Reason, ok: bool) {
 	if ok {
-		sync.mutex_unlock(&stop_test_gate)
+		sync.atomic_mutex_unlock(&stop_test_gate)
 	}
 }
 
